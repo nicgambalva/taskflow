@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from "react";
+import { db } from "./firebase";
+import {
+  collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc
+} from "firebase/firestore";
 
 const USERS = ["— Unassigned —", "Matthieu", "Tétiana", "Melvyn", "Nicolas", "Ksenia", "Sudhir", "Lilia", "Shamir"];
 const DAYS  = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-// JS getDay(): 0=Sun, 1=Mon, ..., 6=Sat
 const DAY_INDEX = { Monday:1, Tuesday:2, Wednesday:3, Thursday:4, Friday:5, Saturday:6, Sunday:0 };
-
-function generateId() { return Math.random().toString(36).slice(2, 10); }
 
 function isOverdue(deadline, validated) {
   if (validated || !deadline) return false;
@@ -20,7 +21,6 @@ function formatDeadline(iso) {
   });
 }
 
-// Returns the ISO string of the next reset moment for a recurring task
 function getNextReset(task) {
   const now = new Date();
   if (task.recurringDaily) {
@@ -55,23 +55,6 @@ function formatNextReset(iso) {
   if (diffH < 24) return `in ${diffH}h`;
   return `in ${diffD}d`;
 }
-
-const defaultTasks = [
-  {
-    id: generateId(), name: "Prepare weekly report", assignee: "Matthieu",
-    deadline: new Date(Date.now() - 3600000).toISOString(), validated: false,
-    fileName: null, fileData: null, createdAt: new Date(Date.now() - 86400000).toISOString(),
-    recurringDaily: false, recurringWeekly: true, weeklyDay: "Monday", weeklyTime: "09:00",
-    validatedAt: null, lastReset: null,
-  },
-  {
-    id: generateId(), name: "Update documentation", assignee: "Nicolas",
-    deadline: new Date(Date.now() + 7200000).toISOString(), validated: true,
-    fileName: null, fileData: null, createdAt: new Date(Date.now() - 3600000).toISOString(),
-    recurringDaily: true, recurringWeekly: false, weeklyDay: "Monday", weeklyTime: "09:00",
-    validatedAt: new Date(Date.now() - 86400000 * 2).toISOString(), lastReset: null,
-  },
-];
 
 const emptyForm = {
   name: "", assignee: "— Unassigned —", deadline: "",
@@ -115,33 +98,37 @@ function Stat({ label, value, color }) {
 }
 
 export default function App() {
-  const [tasks, setTasks] = useState(() => {
-    try { const s = localStorage.getItem("taskflow-v3"); return s ? JSON.parse(s) : defaultTasks; }
-    catch { return defaultTasks; }
-  });
+  const [tasks, setTasks] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState(null);
   const [form, setForm] = useState(emptyForm);
   const [previewFile, setPreviewFile] = useState(null);
   const fileRef = useRef();
 
+  // Real-time listener from Firestore
   useEffect(() => {
-    try { localStorage.setItem("taskflow-v3", JSON.stringify(tasks)); } catch {}
-  }, [tasks]);
+    const unsub = onSnapshot(collection(db, "tasks"), snapshot => {
+      const data = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      setTasks(data);
+      setLoading(false);
+    });
+    return () => unsub();
+  }, []);
 
-  // Recurring reset check — runs every 30 seconds
+  // Recurring reset check
   useEffect(() => {
-    function checkResets() {
+    async function checkResets() {
       const now = new Date();
-      setTasks(prev => prev.map(task => {
-        if (!task.validated) return task;
-        if (!task.recurringDaily && !task.recurringWeekly) return task;
+      for (const task of tasks) {
+        if (!task.validated) continue;
+        if (!task.recurringDaily && !task.recurringWeekly) continue;
+
+        let shouldReset = false;
 
         if (task.recurringDaily) {
           const midnight = new Date(now); midnight.setHours(0, 0, 0, 0);
           const validatedAt = task.validatedAt ? new Date(task.validatedAt) : null;
-          if (validatedAt && validatedAt < midnight) {
-            return { ...task, validated: false, validatedAt: null, lastReset: now.toISOString() };
-          }
+          if (validatedAt && validatedAt < midnight) shouldReset = true;
         }
 
         if (task.recurringWeekly) {
@@ -156,18 +143,20 @@ export default function App() {
           lastOccurrence.setDate(lastOccurrence.getDate() - daysBack);
           lastOccurrence.setHours(h, m, 0, 0);
           const validatedAt = task.validatedAt ? new Date(task.validatedAt) : null;
-          if (validatedAt && validatedAt < lastOccurrence) {
-            return { ...task, validated: false, validatedAt: null, lastReset: now.toISOString() };
-          }
+          if (validatedAt && validatedAt < lastOccurrence) shouldReset = true;
         }
 
-        return task;
-      }));
+        if (shouldReset) {
+          await updateDoc(doc(db, "tasks", task.id), {
+            validated: false, validatedAt: null, lastReset: now.toISOString()
+          });
+        }
+      }
     }
-    checkResets();
+    if (tasks.length > 0) checkResets();
     const t = setInterval(checkResets, 30000);
     return () => clearInterval(t);
-  }, []);
+  }, [tasks]);
 
   const sorted = [...tasks].sort((a, b) => {
     if (a.validated !== b.validated) return a.validated ? 1 : -1;
@@ -178,7 +167,15 @@ export default function App() {
   function openAdd() { setForm(emptyForm); setModal({ mode: "add" }); }
 
   function openEdit(task) {
-    setForm({ name: task.name, assignee: task.assignee, deadline: task.deadline ? task.deadline.slice(0, 16) : "", fileName: task.fileName, fileData: task.fileData, recurringDaily: task.recurringDaily || false, recurringWeekly: task.recurringWeekly || false, weeklyDay: task.weeklyDay || "Monday", weeklyTime: task.weeklyTime || "09:00" });
+    setForm({
+      name: task.name, assignee: task.assignee,
+      deadline: task.deadline ? task.deadline.slice(0, 16) : "",
+      fileName: task.fileName, fileData: task.fileData,
+      recurringDaily: task.recurringDaily || false,
+      recurringWeekly: task.recurringWeekly || false,
+      weeklyDay: task.weeklyDay || "Monday",
+      weeklyTime: task.weeklyTime || "09:00",
+    });
     setModal({ mode: "edit", task });
   }
 
@@ -189,23 +186,39 @@ export default function App() {
     reader.readAsDataURL(file);
   }
 
-  function saveForm() {
+  async function saveForm() {
     if (!form.name.trim()) return;
     const deadline = form.deadline ? new Date(form.deadline).toISOString() : null;
-    const rec = { recurringDaily: form.recurringDaily, recurringWeekly: form.recurringWeekly, weeklyDay: form.weeklyDay, weeklyTime: form.weeklyTime };
+    const rec = {
+      recurringDaily: form.recurringDaily, recurringWeekly: form.recurringWeekly,
+      weeklyDay: form.weeklyDay, weeklyTime: form.weeklyTime
+    };
+    const payload = {
+      name: form.name.trim(), assignee: form.assignee, deadline,
+      fileName: form.fileName || null, fileData: form.fileData || null, ...rec
+    };
     if (modal.mode === "add") {
-      setTasks(t => [...t, { id: generateId(), name: form.name.trim(), assignee: form.assignee, deadline, validated: false, validatedAt: null, fileName: form.fileName, fileData: form.fileData, createdAt: new Date().toISOString(), lastReset: null, ...rec }]);
+      await addDoc(collection(db, "tasks"), {
+        ...payload, validated: false, validatedAt: null,
+        createdAt: new Date().toISOString(), lastReset: null
+      });
     } else {
-      setTasks(t => t.map(task => task.id === modal.task.id ? { ...task, name: form.name.trim(), assignee: form.assignee, deadline, fileName: form.fileName, fileData: form.fileData, ...rec } : task));
+      await updateDoc(doc(db, "tasks", modal.task.id), payload);
     }
     setModal(null);
   }
 
-  function validate(id) {
-    setTasks(t => t.map(task => task.id === id ? { ...task, validated: !task.validated, validatedAt: !task.validated ? new Date().toISOString() : null } : task));
+  async function validate(task) {
+    const newVal = !task.validated;
+    await updateDoc(doc(db, "tasks", task.id), {
+      validated: newVal,
+      validatedAt: newVal ? new Date().toISOString() : null
+    });
   }
 
-  function deleteTask(id) { setTasks(t => t.filter(task => task.id !== id)); }
+  async function deleteTask(id) {
+    await deleteDoc(doc(db, "tasks", id));
+  }
 
   const overdueCount = tasks.filter(t => isOverdue(t.deadline, t.validated)).length;
   const doneCount = tasks.filter(t => t.validated).length;
@@ -230,63 +243,67 @@ export default function App() {
       </header>
 
       <main style={styles.main}>
-        <div style={styles.tableWrap}>
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                {["#", "Task", "Assigned to", "Deadline", "↻ Daily", "↻ Weekly", "Document", "Status", "Actions"].map(h => (
-                  <th key={h} style={styles.th}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {sorted.length === 0 && <tr><td colSpan={9} style={styles.empty}>No tasks yet. Add one!</td></tr>}
-              {sorted.map((task, i) => {
-                const overdue = isOverdue(task.deadline, task.validated);
-                const nextReset = (task.recurringDaily || task.recurringWeekly) ? getNextReset(task) : null;
-                return (
-                  <tr key={task.id} style={{ ...styles.tr, ...(task.validated ? styles.trDone : {}), ...(overdue ? styles.trOverdue : {}), animation: overdue ? "blink 1.2s ease-in-out infinite" : "none" }}>
-                    <td style={styles.td}><span style={styles.idx}>{i + 1}</span></td>
-                    <td style={{ ...styles.td, ...styles.tdName }}>
-                      {task.validated && <span style={styles.check}>✓ </span>}
-                      <span style={task.validated ? styles.striked : {}}>{task.name}</span>
-                      {task.lastReset && <div style={styles.resetNote}>↺ auto-reopened</div>}
-                    </td>
-                    <td style={styles.td}>
-                      <span style={styles.assignee}>{task.assignee === "— Unassigned —" ? <em style={{ opacity: 0.5 }}>—</em> : task.assignee}</span>
-                    </td>
-                    <td style={styles.td}>
-                      <span style={{ ...styles.deadline, ...(overdue ? styles.deadlineRed : {}) }}>
-                        {formatDeadline(task.deadline)}
-                        {overdue && <span style={styles.badge}>OVERDUE</span>}
-                      </span>
-                    </td>
-                    <td style={{ ...styles.td, textAlign: "center" }}>
-                      {task.recurringDaily ? <DailyBadge nextReset={task.validated ? nextReset : null} /> : <span style={{ opacity: 0.2, fontSize: 11 }}>—</span>}
-                    </td>
-                    <td style={{ ...styles.td, textAlign: "center" }}>
-                      {task.recurringWeekly ? <WeeklyBadge day={task.weeklyDay} time={task.weeklyTime} nextReset={task.validated ? nextReset : null} /> : <span style={{ opacity: 0.2, fontSize: 11 }}>—</span>}
-                    </td>
-                    <td style={styles.td}>
-                      {task.fileData ? <button style={styles.fileBtn} onClick={() => setPreviewFile(task)}>📎 {task.fileName?.length > 14 ? task.fileName.slice(0, 12) + "…" : task.fileName}</button> : <span style={{ opacity: 0.3 }}>—</span>}
-                    </td>
-                    <td style={styles.td}>
-                      <button style={{ ...styles.validateBtn, ...(task.validated ? styles.validateBtnDone : {}) }} onClick={() => validate(task.id)}>
-                        {task.validated ? "✓ Done" : "Mark done"}
-                      </button>
-                    </td>
-                    <td style={styles.td}>
-                      <div style={styles.actions}>
-                        <button style={styles.iconBtn} title="Edit" onClick={() => openEdit(task)}>✎</button>
-                        <button style={{ ...styles.iconBtn, ...styles.iconBtnRed }} title="Delete" onClick={() => deleteTask(task.id)}>✕</button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        {loading ? (
+          <div style={styles.empty}>Connecting to database...</div>
+        ) : (
+          <div style={styles.tableWrap}>
+            <table style={styles.table}>
+              <thead>
+                <tr>
+                  {["#", "Task", "Assigned to", "Deadline", "↻ Daily", "↻ Weekly", "Document", "Status", "Actions"].map(h => (
+                    <th key={h} style={styles.th}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {sorted.length === 0 && <tr><td colSpan={9} style={styles.empty}>No tasks yet. Add one!</td></tr>}
+                {sorted.map((task, i) => {
+                  const overdue = isOverdue(task.deadline, task.validated);
+                  const nextReset = (task.recurringDaily || task.recurringWeekly) ? getNextReset(task) : null;
+                  return (
+                    <tr key={task.id} style={{ ...styles.tr, ...(task.validated ? styles.trDone : {}), ...(overdue ? styles.trOverdue : {}), animation: overdue ? "blink 1.2s ease-in-out infinite" : "none" }}>
+                      <td style={styles.td}><span style={styles.idx}>{i + 1}</span></td>
+                      <td style={{ ...styles.td, ...styles.tdName }}>
+                        {task.validated && <span style={styles.check}>✓ </span>}
+                        <span style={task.validated ? styles.striked : {}}>{task.name}</span>
+                        {task.lastReset && <div style={styles.resetNote}>↺ auto-reopened</div>}
+                      </td>
+                      <td style={styles.td}>
+                        <span style={styles.assignee}>{task.assignee === "— Unassigned —" ? <em style={{ opacity: 0.5 }}>—</em> : task.assignee}</span>
+                      </td>
+                      <td style={styles.td}>
+                        <span style={{ ...styles.deadline, ...(overdue ? styles.deadlineRed : {}) }}>
+                          {formatDeadline(task.deadline)}
+                          {overdue && <span style={styles.badge}>OVERDUE</span>}
+                        </span>
+                      </td>
+                      <td style={{ ...styles.td, textAlign: "center" }}>
+                        {task.recurringDaily ? <DailyBadge nextReset={task.validated ? nextReset : null} /> : <span style={{ opacity: 0.2, fontSize: 11 }}>—</span>}
+                      </td>
+                      <td style={{ ...styles.td, textAlign: "center" }}>
+                        {task.recurringWeekly ? <WeeklyBadge day={task.weeklyDay} time={task.weeklyTime} nextReset={task.validated ? nextReset : null} /> : <span style={{ opacity: 0.2, fontSize: 11 }}>—</span>}
+                      </td>
+                      <td style={styles.td}>
+                        {task.fileData ? <button style={styles.fileBtn} onClick={() => setPreviewFile(task)}>📎 {task.fileName?.length > 14 ? task.fileName.slice(0, 12) + "…" : task.fileName}</button> : <span style={{ opacity: 0.3 }}>—</span>}
+                      </td>
+                      <td style={styles.td}>
+                        <button style={{ ...styles.validateBtn, ...(task.validated ? styles.validateBtnDone : {}) }} onClick={() => validate(task)}>
+                          {task.validated ? "✓ Done" : "Mark done"}
+                        </button>
+                      </td>
+                      <td style={styles.td}>
+                        <div style={styles.actions}>
+                          <button style={styles.iconBtn} title="Edit" onClick={() => openEdit(task)}>✎</button>
+                          <button style={{ ...styles.iconBtn, ...styles.iconBtnRed }} title="Delete" onClick={() => deleteTask(task.id)}>✕</button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
         <button style={styles.addBtn} onClick={openAdd}>+ Add task</button>
       </main>
 

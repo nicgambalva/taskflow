@@ -314,23 +314,10 @@ export default function App() {
   // Fixed: always creates a new deadline even if original has none
   async function copyToNextDay(task) {
     const newDeadline = addDays(task.deadline || null, 1);
-    await addDoc(collection(db,"tasks"), {
-      name: task.name,
-      assignee: task.assignee||"— Unassigned —",
+    await updateDoc(doc(db, "tasks", task.id), {
       deadline: newDeadline,
-      type: task.type||"",
-      comment: task.comment||"",
-      shift: task.shift||"",
-      rescheduleDate: null,
-      fileName: null,
-      fileData: null,
-      recurringDaily: false,
-      recurringWeekly: false,
-      weeklyDay: task.weeklyDay||"Monday",
-      weeklyTime: task.weeklyTime||"09:00",
       validated: false,
       validatedAt: null,
-      createdAt: new Date().toISOString(),
       lastReset: null,
     });
   }

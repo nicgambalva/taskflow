@@ -4,12 +4,12 @@ import {
   collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc
 } from "firebase/firestore";
 
-// ─── SHIFT CONFIG (labels only — user selects manually) ───────────────────────
+// ─── SHIFT OPTIONS ────────────────────────────────────────────────────────────
 const SHIFT_OPTIONS = [
-  { value: "",      label: "— No shift —",  color: "#6b6b9a", bg: "transparent" },
-  { value: "early", label: "Early",          color: "#74b0ff", bg: "#1a2535" },
-  { value: "mid",   label: "Mid",            color: "#6ee7b7", bg: "#162b22" },
-  { value: "late",  label: "Late",           color: "#f9a8d4", bg: "#2b1a25" },
+  { value: "",      label: "— No shift —", color: "#6b6b9a", bg: "transparent" },
+  { value: "early", label: "Early",        color: "#74b0ff", bg: "#1a2535" },
+  { value: "mid",   label: "Mid",          color: "#6ee7b7", bg: "#162b22" },
+  { value: "late",  label: "Late",         color: "#f9a8d4", bg: "#2b1a25" },
 ];
 function shiftCfg(val) { return SHIFT_OPTIONS.find(s => s.value === val) || SHIFT_OPTIONS[0]; }
 
@@ -32,28 +32,20 @@ function toDateStr(iso) {
   return new Date(iso).toISOString().slice(0,10);
 }
 function isToday(iso) {
-  if (!iso) return false;
-  return toDateStr(iso) === toDateStr(new Date().toISOString());
+  return !!iso && toDateStr(iso) === toDateStr(new Date().toISOString());
 }
 function addDays(iso, n) {
-  if (!iso) return null;
-  const d = new Date(iso);
+  const d = iso ? new Date(iso) : new Date();
   d.setDate(d.getDate() + n);
   return d.toISOString();
 }
-
-// Does a recurring task "occur" on a given date string (YYYY-MM-DD)?
 function recurringOccursOn(task, dateStr) {
   if (!dateStr) return false;
   const d = new Date(dateStr + "T12:00:00");
   if (task.recurringDaily) return true;
-  if (task.recurringWeekly) {
-    const targetDay = DAY_INDEX[task.weeklyDay] ?? 1;
-    return d.getDay() === targetDay;
-  }
+  if (task.recurringWeekly) return d.getDay() === (DAY_INDEX[task.weeklyDay] ?? 1);
   return false;
 }
-
 function getNextReset(task) {
   const now = new Date();
   if (task.recurringDaily) {
@@ -98,17 +90,88 @@ function exportToCSV(tasks) {
   a.click(); URL.revokeObjectURL(url);
 }
 
-// ─── SMALL COMPONENTS ─────────────────────────────────────────────────────────
-function ShiftBadge({ shift }) {
-  const cfg = shiftCfg(shift);
-  if (!shift) return <span style={{opacity:0.2,fontSize:11}}>—</span>;
-  return <span style={{display:"inline-flex",alignItems:"center",background:cfg.bg,border:`1px solid ${cfg.color}44`,color:cfg.color,fontSize:10,padding:"2px 8px",borderRadius:20,letterSpacing:"0.06em"}}>{cfg.label}</span>;
+// ─── INLINE SELECT (reusable — fixes the blur-before-change race) ─────────────
+// Uses onMouseDown on options to register the pick before onBlur fires.
+function InlineSelect({ value, options, onPick, onClose, renderTrigger }) {
+  const [open, setOpen] = useState(false);
+
+  if (!open) {
+    return (
+      <span style={{cursor:"pointer"}} onClick={() => setOpen(true)}>
+        {renderTrigger(value)}
+      </span>
+    );
+  }
+
+  return (
+    <div style={{position:"relative", display:"inline-block"}}>
+      <select
+        autoFocus
+        size={options.length}
+        style={{
+          position:"absolute", top:0, left:0, zIndex:999,
+          background:"#13131f", border:"1px solid #3a3a5c",
+          color:"#e8e4ff", borderRadius:8, padding:"4px 0",
+          fontFamily:"inherit", fontSize:12, outline:"none",
+          minWidth:140, cursor:"pointer",
+        }}
+        value={value}
+        onChange={e => { onPick(e.target.value); setOpen(false); }}
+        onBlur={() => setOpen(false)}
+      >
+        {options.map(o => (
+          <option key={o.value} value={o.value}>{o.label}</option>
+        ))}
+      </select>
+      {/* Spacer so row doesn't collapse */}
+      <span style={{visibility:"hidden"}}>{renderTrigger(value)}</span>
+    </div>
+  );
 }
+
+// ─── INLINE ASSIGNEE ──────────────────────────────────────────────────────────
+function InlineAssignee({ task, onUpdate }) {
+  const userOptions = USERS.map(u => ({ value: u, label: u }));
+  return (
+    <InlineSelect
+      value={task.assignee || "— Unassigned —"}
+      options={userOptions}
+      onPick={val => onUpdate(task.id, { assignee: val })}
+      renderTrigger={val => (
+        <span style={{...S.assignee}}>
+          {val === "— Unassigned —" ? <em style={{opacity:0.5}}>—</em> : val}
+        </span>
+      )}
+    />
+  );
+}
+
+// ─── INLINE SHIFT ─────────────────────────────────────────────────────────────
+function InlineShift({ task, onUpdate }) {
+  return (
+    <InlineSelect
+      value={task.shift || ""}
+      options={SHIFT_OPTIONS}
+      onPick={val => onUpdate(task.id, { shift: val })}
+      renderTrigger={val => {
+        const cfg = shiftCfg(val);
+        if (!val) return <span style={{opacity:0.2,fontSize:11,cursor:"pointer"}}>— set —</span>;
+        return (
+          <span style={{display:"inline-flex",alignItems:"center",background:cfg.bg,border:`1px solid ${cfg.color}44`,color:cfg.color,fontSize:10,padding:"2px 8px",borderRadius:20,letterSpacing:"0.06em",cursor:"pointer"}}>
+            {cfg.label}
+          </span>
+        );
+      }}
+    />
+  );
+}
+
+// ─── SMALL COMPONENTS ─────────────────────────────────────────────────────────
 function DailyBadge({ nextReset }) {
   return (
     <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
       <span style={{display:"inline-flex",alignItems:"center",gap:4,background:"#1a2535",border:"1px solid #3b5bdb44",color:"#74b0ff",fontSize:10,padding:"2px 8px",borderRadius:20,letterSpacing:"0.06em"}}>↻ Daily</span>
-      {nextReset&&<span style={{fontSize:9,color:"#3b5bdb",letterSpacing:"0.04em"}}>{formatNextReset(nextReset)}</span>}
+      {nextReset&&<span style={{fontSize:9,color:"#3b5bdb"}}>{formatNextReset(nextReset)}</span>}
     </div>
   );
 }
@@ -116,7 +179,7 @@ function WeeklyBadge({ day, time, nextReset }) {
   return (
     <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
       <span style={{display:"inline-flex",alignItems:"center",gap:4,background:"#1e1a35",border:"1px solid #7c3aed44",color:"#c8b8ff",fontSize:10,padding:"2px 8px",borderRadius:20,letterSpacing:"0.06em"}}>↻ {day} {time}</span>
-      {nextReset&&<span style={{fontSize:9,color:"#7c3aed",letterSpacing:"0.04em"}}>{formatNextReset(nextReset)}</span>}
+      {nextReset&&<span style={{fontSize:9,color:"#7c3aed"}}>{formatNextReset(nextReset)}</span>}
     </div>
   );
 }
@@ -136,45 +199,6 @@ function Stat({ label, value, color }) {
   );
 }
 
-// ─── INLINE ASSIGNEE — fixed: select stays open, single click to pick ─────────
-function InlineAssignee({ task, onUpdate }) {
-  const [editing, setEditing] = useState(false);
-  const selectRef = useRef();
-
-  useEffect(() => {
-    if (editing && selectRef.current) {
-      // small delay so the element is mounted before we focus
-      setTimeout(() => selectRef.current?.focus(), 0);
-    }
-  }, [editing]);
-
-  if (!editing) {
-    return (
-      <span
-        style={{...S.assignee, cursor:"pointer"}}
-        title="Click to reassign"
-        onClick={() => setEditing(true)}
-      >
-        {task.assignee==="— Unassigned —" ? <em style={{opacity:0.5}}>—</em> : task.assignee}
-      </span>
-    );
-  }
-  return (
-    <select
-      ref={selectRef}
-      style={{...S.input, padding:"3px 8px", fontSize:12, width:"auto", minWidth:130}}
-      defaultValue={task.assignee}
-      onChange={e => {
-        onUpdate(task.id, { assignee: e.target.value });
-        setEditing(false);
-      }}
-      onBlur={() => setEditing(false)}
-    >
-      {USERS.map(u => <option key={u} value={u}>{u}</option>)}
-    </select>
-  );
-}
-
 // ─── EMPTY FORM ───────────────────────────────────────────────────────────────
 const emptyForm = {
   name:"", assignee:"— Unassigned —", deadline:"", type:"", comment:"",
@@ -190,7 +214,6 @@ export default function App() {
   const [form, setForm]       = useState(emptyForm);
   const [previewFile, setPreviewFile] = useState(null);
 
-  // Filters
   const [viewMode, setViewMode]     = useState("today");
   const [filterDate, setFilterDate] = useState("");
   const [filterFrom, setFilterFrom] = useState("");
@@ -200,7 +223,6 @@ export default function App() {
 
   const fileRef = useRef();
 
-  // ── Firestore listener ──
   useEffect(() => {
     const unsub = onSnapshot(collection(db,"tasks"), snapshot => {
       setTasks(snapshot.docs.map(d => ({ id:d.id, ...d.data() })));
@@ -209,7 +231,6 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // ── Recurring reset ──
   useEffect(() => {
     async function checkResets() {
       const now = new Date();
@@ -242,28 +263,16 @@ export default function App() {
     return () => clearInterval(t);
   }, [tasks]);
 
-  // ── Unique task types ──
   const taskTypes = [...new Set(tasks.map(t=>t.type).filter(Boolean))];
 
-  // ── Filtering ──
   const filteredTasks = tasks.filter(task => {
-    // Name search
     if (searchName && !task.name.toLowerCase().includes(searchName.toLowerCase())) return false;
-    // Type filter
     if (filterType && task.type !== filterType) return false;
-
     const isRecurring = task.recurringDaily || task.recurringWeekly;
-
-    if (viewMode==="today") {
-      // Show if deadline is today OR it's a recurring task that occurs today
-      return isToday(task.deadline) || (isRecurring && recurringOccursOn(task, toDateStr(new Date().toISOString())));
-    }
-    if (viewMode==="date" && filterDate) {
-      // Show if deadline matches date OR recurring task occurs on that date
-      return toDateStr(task.deadline)===filterDate || (isRecurring && recurringOccursOn(task, filterDate));
-    }
+    if (viewMode==="today") return isToday(task.deadline) || (isRecurring && recurringOccursOn(task, toDateStr(new Date().toISOString())));
+    if (viewMode==="date" && filterDate) return toDateStr(task.deadline)===filterDate || (isRecurring && recurringOccursOn(task, filterDate));
     if (viewMode==="range") {
-      if (isRecurring) return true; // recurring tasks always visible in range view
+      if (isRecurring) return true;
       if (!task.deadline) return false;
       const d = new Date(task.deadline);
       if (filterFrom && d < new Date(filterFrom)) return false;
@@ -279,24 +288,22 @@ export default function App() {
     return new Date(a.deadline)-new Date(b.deadline);
   });
 
-  // ── Stats (today-based where noted) ──
   const todayTasks      = tasks.filter(t => isToday(t.deadline) || ((t.recurringDaily||t.recurringWeekly) && recurringOccursOn(t, toDateStr(new Date().toISOString()))));
   const doneCount       = filteredTasks.filter(t=>t.validated).length;
   const overdueCount    = filteredTasks.filter(t=>isOverdue(t.deadline,t.validated)).length;
   const unassignedCount = todayTasks.filter(t=>!t.validated&&(!t.assignee||t.assignee==="— Unassigned —")).length;
   const criticalCount   = filteredTasks.filter(t=>isOverdue(t.deadline,t.validated)||(!t.assignee||t.assignee==="— Unassigned —")).length;
 
-  // ── Helpers ──
   async function patchTask(id, patch) { await updateDoc(doc(db,"tasks",id), patch); }
 
   function openAdd() { setForm(emptyForm); setModal({mode:"add"}); }
   function openEdit(task) {
     setForm({
-      name:task.name, assignee:task.assignee,
+      name:task.name, assignee:task.assignee||"— Unassigned —",
       deadline:task.deadline?task.deadline.slice(0,16):"",
       type:task.type||"", comment:task.comment||"", shift:task.shift||"",
       rescheduleDate:task.rescheduleDate||"",
-      fileName:task.fileName, fileData:task.fileData,
+      fileName:task.fileName||null, fileData:task.fileData||null,
       recurringDaily:task.recurringDaily||false,
       recurringWeekly:task.recurringWeekly||false,
       weeklyDay:task.weeklyDay||"Monday", weeklyTime:task.weeklyTime||"09:00",
@@ -304,17 +311,27 @@ export default function App() {
     setModal({mode:"edit",task});
   }
 
-  // Copy task to next day
+  // Fixed: always creates a new deadline even if original has none
   async function copyToNextDay(task) {
-    const newDeadline = task.deadline ? addDays(task.deadline, 1) : null;
+    const newDeadline = addDays(task.deadline || null, 1);
     await addDoc(collection(db,"tasks"), {
-      name: task.name, assignee: task.assignee, deadline: newDeadline,
-      type: task.type||"", comment: task.comment||"", shift: task.shift||"",
-      rescheduleDate: null, fileName: task.fileName||null, fileData: task.fileData||null,
-      recurringDaily: false, recurringWeekly: false,
-      weeklyDay: task.weeklyDay||"Monday", weeklyTime: task.weeklyTime||"09:00",
-      validated: false, validatedAt: null,
-      createdAt: new Date().toISOString(), lastReset: null,
+      name: task.name,
+      assignee: task.assignee||"— Unassigned —",
+      deadline: newDeadline,
+      type: task.type||"",
+      comment: task.comment||"",
+      shift: task.shift||"",
+      rescheduleDate: null,
+      fileName: null,
+      fileData: null,
+      recurringDaily: false,
+      recurringWeekly: false,
+      weeklyDay: task.weeklyDay||"Monday",
+      weeklyTime: task.weeklyTime||"09:00",
+      validated: false,
+      validatedAt: null,
+      createdAt: new Date().toISOString(),
+      lastReset: null,
     });
   }
 
@@ -349,10 +366,8 @@ export default function App() {
   }
   async function deleteTask(id) { await deleteDoc(doc(db,"tasks",id)); }
 
-  // ─────────────────────────────────────────────────────────────────────────────
   return (
     <div style={S.root}>
-      {/* HEADER */}
       <header style={S.header}>
         <div style={S.headerLeft}>
           <div style={S.logoMark}>✦</div>
@@ -371,45 +386,28 @@ export default function App() {
       </header>
 
       <main style={S.main}>
-        {/* FILTER BAR */}
         <div style={S.filterBar}>
-          {/* View tabs */}
           <div style={S.filterTabs}>
             {[["today","Today"],["date","By Date"],["range","Range"]].map(([v,l])=>(
               <button key={v} style={{...S.filterTab,...(viewMode===v?S.filterTabActive:{})}} onClick={()=>setViewMode(v)}>{l}</button>
             ))}
           </div>
-
-          {viewMode==="date" && (
-            <input type="date" style={S.filterInput} value={filterDate} onChange={e=>setFilterDate(e.target.value)}/>
-          )}
-          {viewMode==="range" && (
+          {viewMode==="date"&&<input type="date" style={S.filterInput} value={filterDate} onChange={e=>setFilterDate(e.target.value)}/>}
+          {viewMode==="range"&&(
             <div style={{display:"flex",gap:8,alignItems:"center"}}>
               <input type="date" style={S.filterInput} value={filterFrom} onChange={e=>setFilterFrom(e.target.value)}/>
               <span style={{color:"#6b6b9a",fontSize:12}}>→</span>
               <input type="date" style={S.filterInput} value={filterTo} onChange={e=>setFilterTo(e.target.value)}/>
             </div>
           )}
-
-          {/* Name search */}
-          <input
-            style={{...S.filterInput, minWidth:180}}
-            placeholder="🔍 Search by name..."
-            value={searchName}
-            onChange={e=>setSearchName(e.target.value)}
-          />
-
-          {/* Type filter */}
+          <input style={{...S.filterInput,minWidth:180}} placeholder="🔍 Search by name..." value={searchName} onChange={e=>setSearchName(e.target.value)}/>
           <select style={{...S.filterInput,minWidth:130}} value={filterType} onChange={e=>setFilterType(e.target.value)}>
             <option value="">All types</option>
             {taskTypes.map(t=><option key={t}>{t}</option>)}
           </select>
-
-          {/* Export */}
           <button style={S.exportBtn} onClick={()=>exportToCSV(sorted)}>⬇ Export CSV</button>
         </div>
 
-        {/* TABLE */}
         {loading ? (
           <div style={S.empty}>Connecting to database...</div>
         ) : (
@@ -443,7 +441,9 @@ export default function App() {
                           {overdue&&<span style={S.badge}>OVERDUE</span>}
                         </span>
                       </td>
-                      <td style={{...S.td,textAlign:"center"}}><ShiftBadge shift={task.shift}/></td>
+                      <td style={{...S.td,textAlign:"center"}}>
+                        <InlineShift task={task} onUpdate={patchTask}/>
+                      </td>
                       <td style={{...S.td,maxWidth:140}}>
                         <span style={{fontSize:11,color:"#a0a0c0",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",display:"block",maxWidth:130}}>{task.comment||<span style={{opacity:0.2}}>—</span>}</span>
                       </td>
@@ -478,10 +478,9 @@ export default function App() {
         <button style={S.addBtn} onClick={openAdd}>+ Add task</button>
       </main>
 
-      {/* MODAL */}
       {modal&&(
         <div style={S.overlay} onClick={()=>setModal(null)}>
-          <div style={{...S.modal}} onClick={e=>e.stopPropagation()}>
+          <div style={S.modal} onClick={e=>e.stopPropagation()}>
             <div style={S.modalTitle}>{modal.mode==="add"?"New task":"Edit task"}</div>
 
             <label style={S.label}>Task name *</label>
@@ -503,12 +502,7 @@ export default function App() {
             <div style={{display:"flex",gap:10}}>
               <div style={{flex:2}}>
                 <label style={S.label}>Deadline</label>
-                <input
-                  type="datetime-local"
-                  style={S.input}
-                  value={form.deadline}
-                  onChange={e=>setForm(f=>({...f,deadline:e.target.value}))}
-                />
+                <input type="datetime-local" style={S.input} value={form.deadline} onChange={e=>setForm(f=>({...f,deadline:e.target.value}))}/>
               </div>
               <div style={{flex:1}}>
                 <label style={S.label}>Shift</label>
@@ -572,7 +566,6 @@ export default function App() {
         </div>
       )}
 
-      {/* FILE PREVIEW */}
       {previewFile&&(
         <div style={S.overlay} onClick={()=>setPreviewFile(null)}>
           <div style={{...S.modal,maxWidth:640}} onClick={e=>e.stopPropagation()}>
@@ -594,23 +587,15 @@ export default function App() {
         *{box-sizing:border-box;margin:0;padding:0}body{background:#0d0d14}
         ::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:#1a1a2e}::-webkit-scrollbar-thumb{background:#3d3d6b;border-radius:3px}
         select option{background:#13131f;color:#e8e4ff}
-        input[type="date"], input[type="datetime-local"], input[type="time"] {
-          color-scheme: dark;
-          cursor: pointer;
-        }
+        input[type="date"],input[type="datetime-local"],input[type="time"]{color-scheme:dark;cursor:pointer}
         input[type="date"]::-webkit-calendar-picker-indicator,
         input[type="datetime-local"]::-webkit-calendar-picker-indicator,
-        input[type="time"]::-webkit-calendar-picker-indicator {
-          filter: invert(0.8);
-          cursor: pointer;
-          opacity: 1;
-        }
+        input[type="time"]::-webkit-calendar-picker-indicator{filter:invert(0.8);cursor:pointer;opacity:1}
       `}</style>
     </div>
   );
 }
 
-// ─── STYLES ───────────────────────────────────────────────────────────────────
 const S = {
   root:{ minHeight:"100vh", background:"#0d0d14", fontFamily:"'DM Mono',monospace", color:"#e8e4ff" },
   header:{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"28px 40px 20px", borderBottom:"1px solid #2a2a42", flexWrap:"wrap", gap:16 },
@@ -625,7 +610,7 @@ const S = {
   filterTab:{ background:"#1e1e35", border:"1px solid #2a2a42", color:"#6b6b9a", borderRadius:6, padding:"7px 14px", fontSize:11, cursor:"pointer", fontFamily:"inherit", letterSpacing:"0.06em" },
   filterTabActive:{ background:"#2a2a4a", border:"1px solid #7c3aed66", color:"#c8b8ff" },
   filterInput:{ background:"#0d0d14", border:"1px solid #2a2a42", borderRadius:8, padding:"7px 12px", color:"#e8e4ff", fontSize:12, fontFamily:"inherit", outline:"none", colorScheme:"dark" },
-  exportBtn:{ marginLeft:"auto", background:"#1e1e35", border:"1px solid #3a3a5c", color:"#6ee7b7", borderRadius:6, padding:"7px 16px", fontSize:11, cursor:"pointer", fontFamily:"inherit", letterSpacing:"0.06em" },
+  exportBtn:{ marginLeft:"auto", background:"#1e1e35", border:"1px solid #3a3a5c", color:"#6ee7b7", borderRadius:6, padding:"7px 16px", fontSize:11, cursor:"pointer", fontFamily:"inherit" },
   tableWrap:{ overflowX:"auto", borderRadius:12, border:"1px solid #2a2a42" },
   table:{ width:"100%", borderCollapse:"collapse", minWidth:1100 },
   th:{ padding:"14px 16px", textAlign:"left", fontSize:10, letterSpacing:"0.12em", color:"#6b6b9a", background:"#13131f", borderBottom:"1px solid #2a2a42", fontWeight:500, textTransform:"uppercase", whiteSpace:"nowrap" },
@@ -638,7 +623,7 @@ const S = {
   check:{ color:"#6ee7b7" },
   striked:{ textDecoration:"line-through", opacity:0.6 },
   resetNote:{ fontSize:9, color:"#7c3aed", letterSpacing:"0.06em", marginTop:3 },
-  assignee:{ background:"#1e1e35", padding:"3px 10px", borderRadius:20, fontSize:12, color:"#c8b8ff" },
+  assignee:{ background:"#1e1e35", padding:"3px 10px", borderRadius:20, fontSize:12, color:"#c8b8ff", cursor:"pointer" },
   deadline:{ fontSize:12, color:"#a0a0c0" },
   deadlineRed:{ color:"#fca5a5" },
   badge:{ display:"inline-block", marginLeft:8, background:"#ef444422", color:"#fca5a5", fontSize:9, letterSpacing:"0.1em", padding:"2px 7px", borderRadius:4, border:"1px solid #ef444444" },

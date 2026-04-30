@@ -464,7 +464,7 @@ export default function App() {
                       <td style={S.td}>
                         <div style={S.actions}>
                           <button style={S.iconBtn} title="Edit" onClick={()=>openEdit(task)}>✎</button>
-                          <button style={{...S.iconBtn,...S.iconBtnCopy}} title="Copy to next day" onClick={()=>copyToNextDay(task)}>⊕</button>
+                          <button style={{...S.iconBtn,...S.iconBtnCopy}} title="Copy to next day" onClick={async ()=>{ try{ await copyToNextDay(task); alert("Copied!"); } catch(e){ alert("Error: "+e.message); }}}>+1</button>
                           <button style={{...S.iconBtn,...S.iconBtnRed}} title="Delete" onClick={()=>deleteTask(task.id)}>✕</button>
                         </div>
                       </td>

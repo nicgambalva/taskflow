@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { db } from "./firebase";
 import {
-  collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc
+  collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, query, orderBy
 } from "firebase/firestore";
 
 // ─── SHIFT OPTIONS ────────────────────────────────────────────────────────────
@@ -14,9 +14,10 @@ const SHIFT_OPTIONS = [
 function shiftCfg(val) { return SHIFT_OPTIONS.find(s => s.value === val) || SHIFT_OPTIONS[0]; }
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
-const USERS = ["— Unassigned —","Matthieu","Tétiana","Melvyn","Nicolas","Ksenia","Sudhir","Lilia","Shamir"];
+const TASK_TYPES = ["Call", "Review", "Approval", "Meeting", "Report", "Training", "Maintenance", "Follow-up", "Other"];
 const DAYS  = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
 const DAY_INDEX = { Monday:1,Tuesday:2,Wednesday:3,Thursday:4,Friday:5,Saturday:6,Sunday:0 };
+const UNASSIGNED = "— Unassigned —";
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 function isOverdue(deadline, validated) {
@@ -91,8 +92,7 @@ function exportToCSV(tasks) {
 }
 
 // ─── INLINE SELECT (reusable — fixes the blur-before-change race) ─────────────
-// Uses onMouseDown on options to register the pick before onBlur fires.
-function InlineSelect({ value, options, onPick, onClose, renderTrigger }) {
+function InlineSelect({ value, options, onPick, renderTrigger }) {
   const [open, setOpen] = useState(false);
 
   if (!open) {
@@ -123,23 +123,22 @@ function InlineSelect({ value, options, onPick, onClose, renderTrigger }) {
           <option key={o.value} value={o.value}>{o.label}</option>
         ))}
       </select>
-      {/* Spacer so row doesn't collapse */}
       <span style={{visibility:"hidden"}}>{renderTrigger(value)}</span>
     </div>
   );
 }
 
 // ─── INLINE ASSIGNEE ──────────────────────────────────────────────────────────
-function InlineAssignee({ task, onUpdate }) {
-  const userOptions = USERS.map(u => ({ value: u, label: u }));
+function InlineAssignee({ task, onUpdate, users }) {
+  const userOptions = users.map(u => ({ value: u, label: u }));
   return (
     <InlineSelect
-      value={task.assignee || "— Unassigned —"}
+      value={task.assignee || UNASSIGNED}
       options={userOptions}
       onPick={val => onUpdate(task.id, { assignee: val })}
       renderTrigger={val => (
         <span style={{...S.assignee}}>
-          {val === "— Unassigned —" ? <em style={{opacity:0.5}}>—</em> : val}
+          {val === UNASSIGNED ? <em style={{opacity:0.5}}>—</em> : val}
         </span>
       )}
     />
@@ -201,18 +200,24 @@ function Stat({ label, value, color }) {
 
 // ─── EMPTY FORM ───────────────────────────────────────────────────────────────
 const emptyForm = {
-  name:"", assignee:"— Unassigned —", deadline:"", type:"", comment:"",
+  name:"", assignee: UNASSIGNED, deadline:"", type:"", comment:"",
   shift:"", rescheduleDate:"", fileName:null, fileData:null,
   recurringDaily:false, recurringWeekly:false, weeklyDay:"Monday", weeklyTime:"09:00",
 };
 
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [tasks, setTasks]     = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [modal, setModal]     = useState(null);
-  const [form, setForm]       = useState(emptyForm);
+  const [tasks, setTasks]         = useState([]);
+  const [loading, setLoading]     = useState(true);
+  const [modal, setModal]         = useState(null);
+  const [form, setForm]           = useState(emptyForm);
   const [previewFile, setPreviewFile] = useState(null);
+
+  // ── Dynamic users ──
+  const [usersData, setUsersData] = useState([]);   // [{id, name}] from Firestore
+  const [newUserName, setNewUserName] = useState("");
+  const [userError, setUserError] = useState("");
+  const users = [UNASSIGNED, ...usersData.map(u => u.name)];
 
   const [viewMode, setViewMode]     = useState("today");
   const [filterDate, setFilterDate] = useState("");
@@ -223,6 +228,7 @@ export default function App() {
 
   const fileRef = useRef();
 
+  // ── Firestore: tasks ──
   useEffect(() => {
     const unsub = onSnapshot(collection(db,"tasks"), snapshot => {
       setTasks(snapshot.docs.map(d => ({ id:d.id, ...d.data() })));
@@ -231,6 +237,15 @@ export default function App() {
     return () => unsub();
   }, []);
 
+  // ── Firestore: users ──
+  useEffect(() => {
+    const unsub = onSnapshot(query(collection(db,"users"), orderBy("name")), snapshot => {
+      setUsersData(snapshot.docs.map(d => ({ id:d.id, name:d.data().name })));
+    });
+    return () => unsub();
+  }, []);
+
+  // ── Recurring task auto-reset ──
   useEffect(() => {
     async function checkResets() {
       const now = new Date();
@@ -263,6 +278,24 @@ export default function App() {
     return () => clearInterval(t);
   }, [tasks]);
 
+  // ── User management ──
+  async function addUser() {
+    const name = newUserName.trim();
+    if (!name) return;
+    if (users.includes(name)) {
+      setUserError(`"${name}" already exists.`);
+      return;
+    }
+    setUserError("");
+    setNewUserName("");
+    await addDoc(collection(db,"users"), { name });
+  }
+  async function deleteUser(id) {
+    await deleteDoc(doc(db,"users",id));
+    setNewUserName("");
+    setUserError("");
+  }
+
   const taskTypes = [...new Set(tasks.map(t=>t.type).filter(Boolean))];
 
   const filteredTasks = tasks.filter(task => {
@@ -291,15 +324,15 @@ export default function App() {
   const todayTasks      = tasks.filter(t => isToday(t.deadline) || ((t.recurringDaily||t.recurringWeekly) && recurringOccursOn(t, toDateStr(new Date().toISOString()))));
   const doneCount       = filteredTasks.filter(t=>t.validated).length;
   const overdueCount    = filteredTasks.filter(t=>isOverdue(t.deadline,t.validated)).length;
-  const unassignedCount = todayTasks.filter(t=>!t.validated&&(!t.assignee||t.assignee==="— Unassigned —")).length;
-  const criticalCount   = filteredTasks.filter(t=>isOverdue(t.deadline,t.validated)||(!t.assignee||t.assignee==="— Unassigned —")).length;
+  const unassignedCount = todayTasks.filter(t=>!t.validated&&(!t.assignee||t.assignee===UNASSIGNED)).length;
+  const criticalCount   = filteredTasks.filter(t=>isOverdue(t.deadline,t.validated)||(!t.assignee||t.assignee===UNASSIGNED)).length;
 
   async function patchTask(id, patch) { await updateDoc(doc(db,"tasks",id), patch); }
 
   function openAdd() { setForm(emptyForm); setModal({mode:"add"}); }
   function openEdit(task) {
     setForm({
-      name:task.name, assignee:task.assignee||"— Unassigned —",
+      name:task.name, assignee:task.assignee||UNASSIGNED,
       deadline:task.deadline?task.deadline.slice(0,16):"",
       type:task.type||"", comment:task.comment||"", shift:task.shift||"",
       rescheduleDate:task.rescheduleDate||"",
@@ -311,7 +344,6 @@ export default function App() {
     setModal({mode:"edit",task});
   }
 
-  // Fixed: always creates a new deadline even if original has none
   async function copyToNextDay(task) {
     const newDeadline = addDays(task.deadline || null, 1);
     await updateDoc(doc(db, "tasks", task.id), {
@@ -390,8 +422,14 @@ export default function App() {
           <input style={{...S.filterInput,minWidth:180}} placeholder="🔍 Search by name..." value={searchName} onChange={e=>setSearchName(e.target.value)}/>
           <select style={{...S.filterInput,minWidth:130}} value={filterType} onChange={e=>setFilterType(e.target.value)}>
             <option value="">All types</option>
-            {taskTypes.map(t=><option key={t}>{t}</option>)}
+            {TASK_TYPES.map(t=><option key={t}>{t}</option>)}
           </select>
+          <button style={S.usersBtn} onClick={()=>setModal({mode:"manageUsers"})}>
+            👥 Users ({usersData.length})
+          </button>
+          <button style={S.usersBtn} onClick={()=>setModal({mode:"manageTypes"})}>
+            🏷 Types ({TASK_TYPES.length})
+          </button>
           <button style={S.exportBtn} onClick={()=>exportToCSV(sorted)}>⬇ Export CSV</button>
         </div>
 
@@ -420,7 +458,7 @@ export default function App() {
                         <span style={task.validated?S.striked:{}}>{task.name}</span>
                         {task.lastReset&&<div style={S.resetNote}>↺ auto-reopened</div>}
                       </td>
-                      <td style={S.td}><InlineAssignee task={task} onUpdate={patchTask}/></td>
+                      <td style={S.td}><InlineAssignee task={task} onUpdate={patchTask} users={users}/></td>
                       <td style={S.td}><span style={{fontSize:11,color:"#a0a0c0"}}>{task.type||<span style={{opacity:0.2}}>—</span>}</span></td>
                       <td style={S.td}>
                         <span style={{...S.deadline,...(overdue?S.deadlineRed:{})}}>
@@ -465,7 +503,76 @@ export default function App() {
         <button style={S.addBtn} onClick={openAdd}>+ Add task</button>
       </main>
 
-      {modal&&(
+      {/* ─── MANAGE USERS MODAL ─────────────────────────────────────────────── */}
+      {modal?.mode==="manageUsers"&&(
+        <div style={S.overlay} onClick={()=>setModal(null)}>
+          <div style={{...S.modal,maxWidth:420}} onClick={e=>e.stopPropagation()}>
+            <div style={S.modalTitle}>👥 Manage Users</div>
+
+            {usersData.length===0&&(
+              <div style={{color:"#6b6b9a",fontSize:13,textAlign:"center",padding:"16px 0"}}>No users yet. Add one below.</div>
+            )}
+
+            <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:320,overflowY:"auto"}}>
+              {usersData.map(u=>(
+                <div key={u.id} style={S.userRow}>
+                  <span style={S.userName}>{u.name}</span>
+                  <button
+                    style={S.userDeleteBtn}
+                    title="Remove user"
+                    onClick={()=>deleteUser(u.id)}
+                  >✕</button>
+                </div>
+              ))}
+            </div>
+
+            {userError&&<div style={{color:"#fca5a5",fontSize:11,padding:"6px 10px",background:"#ef444411",border:"1px solid #ef444433",borderRadius:6}}>{userError}</div>}
+
+            <div style={{borderTop:"1px solid #2a2a42",paddingTop:14,display:"flex",gap:8}}>
+              <input
+                style={{...S.input,flex:1,...(userError?{borderColor:"#ef444488"}:{})}}
+                placeholder="New user name..."
+                value={newUserName}
+                onChange={e=>{ setNewUserName(e.target.value); setUserError(""); }}
+                onKeyDown={e=>e.key==="Enter"&&addUser()}
+                autoFocus
+              />
+              <button
+                style={{...S.saveBtn,padding:"10px 18px",whiteSpace:"nowrap"}}
+                onClick={addUser}
+                disabled={!newUserName.trim()}
+              >+ Add</button>
+            </div>
+
+            <div style={S.modalBtns}>
+              <button style={S.cancelBtn} onClick={()=>setModal(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── MANAGE TYPES MODAL ─────────────────────────────────────────────── */}
+      {modal?.mode==="manageTypes"&&(
+        <div style={S.overlay} onClick={()=>setModal(null)}>
+          <div style={{...S.modal,maxWidth:420}} onClick={e=>e.stopPropagation()}>
+            <div style={S.modalTitle}>🏷 Task Types</div>
+            <div style={{color:"#6b6b9a",fontSize:11,marginTop:-6,marginBottom:4}}>Predefined list used when creating a task.</div>
+            <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:380,overflowY:"auto"}}>
+              {TASK_TYPES.map(t=>(
+                <div key={t} style={S.userRow}>
+                  <span style={S.userName}>{t}</span>
+                </div>
+              ))}
+            </div>
+            <div style={S.modalBtns}>
+              <button style={S.cancelBtn} onClick={()=>setModal(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── ADD / EDIT TASK MODAL ──────────────────────────────────────────── */}
+      {modal&&modal.mode!=="manageUsers"&&(
         <div style={S.overlay} onClick={()=>setModal(null)}>
           <div style={S.modal} onClick={e=>e.stopPropagation()}>
             <div style={S.modalTitle}>{modal.mode==="add"?"New task":"Edit task"}</div>
@@ -477,12 +584,15 @@ export default function App() {
               <div style={{flex:1}}>
                 <label style={S.label}>Assigned to</label>
                 <select style={S.input} value={form.assignee} onChange={e=>setForm(f=>({...f,assignee:e.target.value}))}>
-                  {USERS.map(u=><option key={u}>{u}</option>)}
+                  {users.map(u=><option key={u}>{u}</option>)}
                 </select>
               </div>
               <div style={{flex:1}}>
                 <label style={S.label}>Type</label>
-                <input style={S.input} placeholder="e.g. Review, Call..." value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))}/>
+                <select style={S.input} value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))}>
+                  <option value="">— No type —</option>
+                  {TASK_TYPES.map(t=><option key={t} value={t}>{t}</option>)}
+                </select>
               </div>
             </div>
 
@@ -553,6 +663,7 @@ export default function App() {
         </div>
       )}
 
+      {/* ─── FILE PREVIEW MODAL ─────────────────────────────────────────────── */}
       {previewFile&&(
         <div style={S.overlay} onClick={()=>setPreviewFile(null)}>
           <div style={{...S.modal,maxWidth:640}} onClick={e=>e.stopPropagation()}>
@@ -597,6 +708,7 @@ const S = {
   filterTab:{ background:"#1e1e35", border:"1px solid #2a2a42", color:"#6b6b9a", borderRadius:6, padding:"7px 14px", fontSize:11, cursor:"pointer", fontFamily:"inherit", letterSpacing:"0.06em" },
   filterTabActive:{ background:"#2a2a4a", border:"1px solid #7c3aed66", color:"#c8b8ff" },
   filterInput:{ background:"#0d0d14", border:"1px solid #2a2a42", borderRadius:8, padding:"7px 12px", color:"#e8e4ff", fontSize:12, fontFamily:"inherit", outline:"none", colorScheme:"dark" },
+  usersBtn:{ background:"#1e1e35", border:"1px solid #c8b8ff44", color:"#c8b8ff", borderRadius:6, padding:"7px 14px", fontSize:11, cursor:"pointer", fontFamily:"inherit", letterSpacing:"0.04em" },
   exportBtn:{ marginLeft:"auto", background:"#1e1e35", border:"1px solid #3a3a5c", color:"#6ee7b7", borderRadius:6, padding:"7px 16px", fontSize:11, cursor:"pointer", fontFamily:"inherit" },
   tableWrap:{ overflowX:"auto", borderRadius:12, border:"1px solid #2a2a42" },
   table:{ width:"100%", borderCollapse:"collapse", minWidth:1100 },
@@ -637,4 +749,8 @@ const S = {
   modalBtns:{ display:"flex", gap:10, justifyContent:"flex-end", marginTop:8 },
   cancelBtn:{ background:"none", border:"1px solid #2a2a42", color:"#6b6b9a", borderRadius:8, padding:"10px 20px", fontSize:13, cursor:"pointer", fontFamily:"inherit" },
   saveBtn:{ background:"linear-gradient(135deg,#7c3aed,#4f46e5)", border:"none", color:"#fff", borderRadius:8, padding:"10px 24px", fontSize:13, cursor:"pointer", fontFamily:"inherit", fontWeight:500, textDecoration:"none", display:"inline-flex", alignItems:"center" },
+  // User management
+  userRow:{ display:"flex", alignItems:"center", justifyContent:"space-between", background:"#0d0d14", border:"1px solid #2a2a42", borderRadius:8, padding:"10px 14px" },
+  userName:{ fontSize:13, color:"#e8e4ff" },
+  userDeleteBtn:{ background:"none", border:"1px solid #ef444444", color:"#fca5a5", borderRadius:6, width:28, height:28, cursor:"pointer", fontSize:12, fontFamily:"inherit", flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center" },
 };

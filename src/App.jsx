@@ -3,6 +3,7 @@ import { db } from "./firebase";
 import {
   collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, query, orderBy
 } from "firebase/firestore";
+import Login from "./Login";
 
 // ─── SHIFT OPTIONS ────────────────────────────────────────────────────────────
 const SHIFT_OPTIONS = [
@@ -168,10 +169,18 @@ function DatePickerInput({ value, onChange, min, hasError, compact }) {
 // ─── INLINE SELECT (reusable — fixes the blur-before-change race) ─────────────
 function InlineSelect({ value, options, onPick, renderTrigger }) {
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState({ top: 0, left: 0 });
+  const triggerRef = useRef();
+
+  function handleTriggerClick() {
+    const rect = triggerRef.current.getBoundingClientRect();
+    setPos({ top: rect.bottom + 4, left: rect.left });
+    setOpen(true);
+  }
 
   if (!open) {
     return (
-      <span style={{cursor:"pointer"}} onClick={() => setOpen(true)}>
+      <span ref={triggerRef} style={{cursor:"pointer"}} onClick={handleTriggerClick}>
         {renderTrigger(value)}
       </span>
     );
@@ -181,13 +190,15 @@ function InlineSelect({ value, options, onPick, renderTrigger }) {
     <div style={{position:"relative", display:"inline-block"}}>
       <select
         autoFocus
-        size={options.length}
+        size={Math.min(options.length, 10)}
         style={{
-          position:"absolute", top:0, left:0, zIndex:999,
+          position:"fixed", top: pos.top, left: pos.left, zIndex:9999,
           background:"#13131f", border:"1px solid #3a3a5c",
           color:"#e8e4ff", borderRadius:8, padding:"4px 0",
           fontFamily:"inherit", fontSize:12, outline:"none",
-          minWidth:140, cursor:"pointer",
+          minWidth:160, cursor:"pointer",
+          maxHeight:260, overflowY:"auto",
+          boxShadow:"0 8px 32px #000a",
         }}
         value={value}
         onChange={e => { onPick(e.target.value); setOpen(false); }}
@@ -290,7 +301,8 @@ const emptyForm = {
 
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [tasks, setTasks]         = useState([]);
+  const [isLoggedIn, setIsLoggedIn] = useState(() => sessionStorage.getItem("tf_auth") === "1");
+  const [tasks, setTasks]           = useState([]);
   const [loading, setLoading]     = useState(true);
   const [modal, setModal]         = useState(null);
   const [form, setForm]           = useState(emptyForm);
@@ -650,6 +662,10 @@ export default function App() {
     </thead>
   );
 
+  if (!isLoggedIn) return (
+    <Login onLogin={() => { sessionStorage.setItem("tf_auth", "1"); setIsLoggedIn(true); }} />
+  );
+
   return (
     <div style={S.root}>
       <header style={S.header}>
@@ -666,6 +682,9 @@ export default function App() {
           <Stat label="Unassigned" value={unassignedCount}      color="#74b0ff"/>
           <Stat label="Critical"   value={criticalCount}        color="#f97316"/>
         </div>
+        <button style={S.logoutBtn} onClick={() => { sessionStorage.removeItem("tf_auth"); setIsLoggedIn(false); }} title="Se déconnecter">
+          ⎋ Se déconnecter
+        </button>
       </header>
 
       <main style={S.main}>
@@ -684,11 +703,11 @@ export default function App() {
             </div>
           )}
           <input style={{...S.filterInput,minWidth:180}} placeholder="🔍 Search by name..." value={searchName} onChange={e=>setSearchName(e.target.value)}/>
-          <select style={{...S.filterInput,minWidth:130}} value={filterType} onChange={e=>setFilterType(e.target.value)}>
-            <option value="">All types</option>
+          <select className="filter-select" style={{...S.filterSelect,minWidth:140}} value={filterType} onChange={e=>setFilterType(e.target.value)}>
+            <option value="">🏷 All types</option>
             {TASK_TYPES.map(t=><option key={t}>{t}</option>)}
           </select>
-          <select style={{...S.filterInput,minWidth:140}} value={filterUser} onChange={e=>setFilterUser(e.target.value)}>
+          <select className="filter-select" style={{...S.filterSelect,minWidth:155}} value={filterUser} onChange={e=>setFilterUser(e.target.value)}>
             <option value="">👤 All users</option>
             {usersData.map(u=><option key={u.id} value={u.name}>{u.name}</option>)}
           </select>
@@ -900,14 +919,14 @@ export default function App() {
             </div>
 
             {form.recurringDaily&&(
-              <div style={{display:"flex",gap:10,paddingLeft:8}}>
-                <div style={{flex:1}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                <div>
                   <label style={S.label}>Start date (optional)</label>
-                  <DatePickerInput value={form.recurringStart} onChange={v=>setForm(f=>({...f,recurringStart:v}))}/>
+                  <DatePickerInput compact value={form.recurringStart} onChange={v=>setForm(f=>({...f,recurringStart:v}))}/>
                 </div>
-                <div style={{flex:1}}>
+                <div>
                   <label style={S.label}>End date (optional)</label>
-                  <DatePickerInput value={form.recurringEnd} onChange={v=>setForm(f=>({...f,recurringEnd:v}))}/>
+                  <DatePickerInput compact value={form.recurringEnd} onChange={v=>setForm(f=>({...f,recurringEnd:v}))}/>
                 </div>
               </div>
             )}
@@ -921,30 +940,26 @@ export default function App() {
             </div>
 
             {form.recurringWeekly&&(
-              <>
-                <div style={{display:"flex",gap:10,paddingLeft:8}}>
-                  <div style={{flex:1}}>
-                    <label style={S.label}>Day</label>
-                    <select style={S.input} value={form.weeklyDay} onChange={e=>setForm(f=>({...f,weeklyDay:e.target.value}))}>
-                      {DAYS.map(d=><option key={d}>{d}</option>)}
-                    </select>
-                  </div>
-                  <div style={{flex:1}}>
-                    <label style={S.label}>Time</label>
-                    <input type="time" style={S.input} value={form.weeklyTime} onChange={e=>setForm(f=>({...f,weeklyTime:e.target.value}))}/>
-                  </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                <div>
+                  <label style={S.label}>Day</label>
+                  <select style={S.input} value={form.weeklyDay} onChange={e=>setForm(f=>({...f,weeklyDay:e.target.value}))}>
+                    {DAYS.map(d=><option key={d}>{d}</option>)}
+                  </select>
                 </div>
-                <div style={{display:"flex",gap:10,paddingLeft:8}}>
-                  <div style={{flex:1}}>
-                    <label style={S.label}>Start date (optional)</label>
-                    <DatePickerInput value={form.recurringStart} onChange={v=>setForm(f=>({...f,recurringStart:v}))}/>
-                  </div>
-                  <div style={{flex:1}}>
-                    <label style={S.label}>End date (optional)</label>
-                    <DatePickerInput value={form.recurringEnd} onChange={v=>setForm(f=>({...f,recurringEnd:v}))}/>
-                  </div>
+                <div>
+                  <label style={S.label}>Time</label>
+                  <input type="time" style={S.input} value={form.weeklyTime} onChange={e=>setForm(f=>({...f,weeklyTime:e.target.value}))}/>
                 </div>
-              </>
+                <div>
+                  <label style={S.label}>Start date (optional)</label>
+                  <DatePickerInput compact value={form.recurringStart} onChange={v=>setForm(f=>({...f,recurringStart:v}))}/>
+                </div>
+                <div>
+                  <label style={S.label}>End date (optional)</label>
+                  <DatePickerInput compact value={form.recurringEnd} onChange={v=>setForm(f=>({...f,recurringEnd:v}))}/>
+                </div>
+              </div>
             )}
 
             <div style={S.recurringRow}>
@@ -1066,6 +1081,7 @@ export default function App() {
         select option{background:#13131f;color:#e8e4ff}
         select option:checked{background:#7c3aed;color:#fff}
         select:focus{border-color:#7c3aed !important;box-shadow:0 0 0 2px #7c3aed22 !important;outline:none !important}
+        .filter-select:hover{background-color:#2a2a4a !important;border-color:#7c3aed !important;box-shadow:0 0 0 2px #7c3aed22}
         input[type="date"],input[type="datetime-local"],input[type="time"]{color-scheme:dark;cursor:pointer}
         input[type="date"]::-webkit-calendar-picker-indicator,
         input[type="datetime-local"]::-webkit-calendar-picker-indicator,
@@ -1089,13 +1105,15 @@ const S = {
   filterTab:{ background:"#1e1e35", border:"1px solid #2a2a42", color:"#6b6b9a", borderRadius:6, padding:"7px 14px", fontSize:11, cursor:"pointer", fontFamily:"inherit", letterSpacing:"0.06em" },
   filterTabActive:{ background:"#2a2a4a", border:"1px solid #7c3aed66", color:"#c8b8ff" },
   filterInput:{ background:"#0d0d14", border:"1px solid #2a2a42", borderRadius:8, padding:"7px 12px", color:"#e8e4ff", fontSize:12, fontFamily:"inherit", outline:"none", colorScheme:"dark" },
+  filterSelect:{ backgroundColor:"#1e1e35", border:"1px solid #4a3a7c", borderRadius:8, padding:"7px 12px", color:"#c8b8ff", fontSize:12, fontFamily:"inherit", outline:"none", colorScheme:"dark", cursor:"pointer", fontWeight:500, backgroundImage:"url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23c8b8ff' d='M6 9L1 3h10z'/%3E%3C/svg%3E\")", backgroundRepeat:"no-repeat", backgroundPosition:"right 10px center" },
   usersBtn:{ background:"#1e1e35", border:"1px solid #c8b8ff44", color:"#c8b8ff", borderRadius:6, padding:"7px 14px", fontSize:11, cursor:"pointer", fontFamily:"inherit", letterSpacing:"0.04em" },
   exportBtn:{ marginLeft:"auto", background:"#1e1e35", border:"1px solid #3a3a5c", color:"#6ee7b7", borderRadius:6, padding:"7px 16px", fontSize:11, cursor:"pointer", fontFamily:"inherit" },
+  logoutBtn:{ background:"none", border:"1px solid #2a2a42", color:"#6b6b9a", borderRadius:6, padding:"6px 14px", fontSize:11, cursor:"pointer", fontFamily:"inherit", letterSpacing:"0.04em", whiteSpace:"nowrap" },
   tableWrap:{ overflowX:"auto", borderRadius:12, border:"1px solid #2a2a42" },
   table:{ width:"100%", borderCollapse:"collapse", minWidth:1269, tableLayout:"fixed" },
   th:{ padding:"14px 16px", textAlign:"left", fontSize:10, letterSpacing:"0.12em", color:"#6b6b9a", background:"#13131f", borderBottom:"1px solid #2a2a42", fontWeight:500, textTransform:"uppercase", whiteSpace:"nowrap" },
   tr:{ borderBottom:"1px solid #1e1e30", transition:"background 0.2s" },
-  trDone:{ opacity:0.45 },
+  trDone:{ opacity:0.62 },
   trOverdue:{ borderLeft:"3px solid #ef4444" },
   td:{ padding:"14px 16px", fontSize:13, verticalAlign:"middle", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", textAlign:"center" },
   tdName:{ fontWeight:500, textAlign:"left" },
@@ -1109,7 +1127,7 @@ const S = {
   badge:{ display:"inline-block", marginLeft:8, background:"#ef444422", color:"#fca5a5", fontSize:9, letterSpacing:"0.1em", padding:"2px 7px", borderRadius:4, border:"1px solid #ef444444" },
   fileBtn:{ background:"none", border:"1px solid #3a3a5c", color:"#c8b8ff", borderRadius:6, padding:"4px 10px", fontSize:11, cursor:"pointer", fontFamily:"inherit" },
   validateBtn:{ background:"linear-gradient(135deg,#4f46e5,#7c3aed)", border:"none", color:"#fff", borderRadius:6, padding:"6px 16px", fontSize:12, cursor:"pointer", fontFamily:"inherit", transition:"all 0.2s", fontWeight:600 },
-  validateBtnDone:{ background:"#162b22", border:"1px solid #6ee7b766", color:"#6ee7b7", fontWeight:500 },
+  validateBtnDone:{ background:"#1a3d2e", border:"2px solid #6ee7b7bb", color:"#6ee7b7", fontWeight:700, boxShadow:"0 0 10px #6ee7b722" },
   actions:{ display:"flex", gap:6 },
   iconBtn:{ background:"#1e1e35", border:"1px solid #3a3a5c", color:"#c8b8ff", borderRadius:6, width:30, height:30, cursor:"pointer", fontSize:14, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:"inherit" },
   iconBtnRed:{ color:"#fca5a5", borderColor:"#ef444444" },

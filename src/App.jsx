@@ -118,53 +118,7 @@ function exportToCSV(tasks) {
 
 
 // ─── DATE PICKER INPUT ────────────────────────────────────────────────────────
-function DatePickerInput({ value, onChange, min, hasError, compact }) {
-  const pickerRef = useRef();
-  const toDisplay = (v) => v ? `${v.slice(8,10)}/${v.slice(5,7)}/${v.slice(0,4)}` : "";
-  const [text, setText] = useState(() => toDisplay(value));
 
-  useEffect(() => { setText(toDisplay(value)); }, [value]);
-
-  const handleChange = (e) => {
-    const raw = e.target.value;
-    const digits = raw.replace(/\D/g, "").slice(0, 8);
-    let formatted = digits;
-    if (digits.length > 2) formatted = `${digits.slice(0,2)}/${digits.slice(2)}`;
-    if (digits.length > 4) formatted = `${digits.slice(0,2)}/${digits.slice(2,4)}/${digits.slice(4)}`;
-    setText(formatted);
-    const m = formatted.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-    if (m) onChange(`${m[3]}-${m[2]}-${m[1]}`);
-    else if (!formatted) onChange("");
-  };
-
-  const pad   = compact ? "7px 10px" : "10px 14px";
-  const fs    = compact ? 12 : 13;
-  const border = hasError ? "1px solid #ef444488" : "1px solid #2a2a42";
-
-  return (
-    <div style={{display:"flex", gap:4, alignItems:"center"}}>
-      <input
-        type="text"
-        placeholder="dd/mm/yyyy"
-        value={text}
-        onChange={handleChange}
-        style={{flex:1, background:"#0d0d14", border, borderRadius:8, padding:pad, color:"#e8e4ff", fontSize:fs, fontFamily:"inherit", outline:"none", minWidth:compact?100:120}}
-      />
-      <div style={{position:"relative", flexShrink:0}}>
-        <button type="button" style={{background:"#1e1e35", border:"1px solid #3a3a5c", color:"#c8b8ff", borderRadius:8, padding:pad, fontSize:fs, cursor:"pointer", fontFamily:"inherit"}}>📅</button>
-        <input
-          ref={pickerRef}
-          type="date"
-          value={value || ""}
-          min={min || ""}
-          onChange={e => { onChange(e.target.value); setText(toDisplay(e.target.value)); }}
-          style={{position:"absolute", inset:0, opacity:0, cursor:"pointer", width:"100%", height:"100%"}}
-          tabIndex={-1}
-        />
-      </div>
-    </div>
-  );
-}
 
 // ─── INLINE SELECT (reusable — fixes the blur-before-change race) ─────────────
 function InlineSelect({ value, options, onPick, renderTrigger }) {
@@ -841,12 +795,12 @@ export default function App() {
               <button key={v} style={{...S.filterTab,...(viewMode===v?S.filterTabActive:{})}} onClick={()=>setViewMode(v)}>{l}</button>
             ))}
           </div>
-          {viewMode==="date"&&<DatePickerInput compact value={filterDate} onChange={setFilterDate}/>}
+          {viewMode==="date"&&<input type="date" style={S.filterInput} value={filterDate} onChange={e=>setFilterDate(e.target.value)}/>}
           {viewMode==="range"&&(
             <div style={{display:"flex",gap:8,alignItems:"center"}}>
-              <DatePickerInput compact value={filterFrom} onChange={setFilterFrom}/>
+              <input type="date" style={S.filterInput} value={filterFrom} onChange={e=>setFilterFrom(e.target.value)}/>
               <span style={{color:"#6b6b9a",fontSize:12}}>→</span>
-              <DatePickerInput compact value={filterTo} onChange={setFilterTo}/>
+              <input type="date" style={S.filterInput} value={filterTo} onChange={e=>setFilterTo(e.target.value)}/>
             </div>
           )}
           <input style={{...S.filterInput,minWidth:180}} placeholder="🔍 Search task..." value={searchName} onChange={e=>setSearchName(e.target.value)}/>
@@ -1021,12 +975,7 @@ export default function App() {
               <label style={S.label}>Deadline *</label>
               <div style={{display:"flex",gap:6,alignItems:"center"}}>
                 <div style={{flex:1}}>
-                  <DatePickerInput
-                    value={form.deadlineDate}
-                    onChange={v=>setForm(f=>({...f,deadlineDate:v}))}
-                    min={localToday()}
-                    hasError={!!formErrors.deadline}
-                  />
+                  <input type="date" style={{...S.input,...(formErrors.deadline?{borderColor:"#ef444488"}:{})}} value={form.deadlineDate} min={localToday()} onChange={e=>setForm(f=>({...f,deadlineDate:e.target.value}))}/>
                 </div>
                 <button type="button" style={S.todayBtn} onClick={()=>setForm(f=>({...f,deadlineDate:localToday()}))}>Today</button>
               </div>
@@ -1061,11 +1010,11 @@ export default function App() {
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
                 <div>
                   <label style={S.label}>Start date (optional)</label>
-                  <DatePickerInput compact value={form.recurringStart} onChange={v=>setForm(f=>({...f,recurringStart:v}))}/>
+                  <input type="date" style={S.input} value={form.recurringStart} onChange={e=>setForm(f=>({...f,recurringStart:e.target.value}))}/>
                 </div>
                 <div>
                   <label style={S.label}>End date (optional)</label>
-                  <DatePickerInput compact value={form.recurringEnd} onChange={v=>setForm(f=>({...f,recurringEnd:v}))}/>
+                  <input type="date" style={S.input} value={form.recurringEnd} onChange={e=>setForm(f=>({...f,recurringEnd:e.target.value}))}/>
                 </div>
               </div>
             )}
@@ -1092,11 +1041,11 @@ export default function App() {
                 </div>
                 <div>
                   <label style={S.label}>Start date (optional)</label>
-                  <DatePickerInput compact value={form.recurringStart} onChange={v=>setForm(f=>({...f,recurringStart:v}))}/>
+                  <input type="date" style={S.input} value={form.recurringStart} onChange={e=>setForm(f=>({...f,recurringStart:e.target.value}))}/>
                 </div>
                 <div>
                   <label style={S.label}>End date (optional)</label>
-                  <DatePickerInput compact value={form.recurringEnd} onChange={v=>setForm(f=>({...f,recurringEnd:v}))}/>
+                  <input type="date" style={S.input} value={form.recurringEnd} onChange={e=>setForm(f=>({...f,recurringEnd:e.target.value}))}/>
                 </div>
               </div>
             )}

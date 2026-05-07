@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { db } from "./firebase";
 import {
-  collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, query, orderBy
+  collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, query, orderBy, writeBatch
 } from "firebase/firestore";
 import Login from "./Login";
 
@@ -213,6 +213,63 @@ function InlineSelect({ value, options, onPick, renderTrigger }) {
   );
 }
 
+// ─── COLUMN FILTER BUTTON ─────────────────────────────────────────────────────
+function ColFilterBtn({ label, value, options, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState({ top: 0, left: 0 });
+  const btnRef = useRef();
+
+  function handleClick(e) {
+    e.stopPropagation();
+    const rect = btnRef.current.getBoundingClientRect();
+    setPos({ top: rect.bottom + 4, left: rect.left });
+    setOpen(o => !o);
+  }
+
+  const active = !!value;
+  return (
+    <>
+      <button
+        ref={btnRef}
+        onClick={handleClick}
+        style={{
+          background: active ? "#3d2a6e" : "none",
+          border: "none",
+          borderRadius: active ? 4 : 0,
+          cursor:"pointer",
+          color: active ? "#e0d4ff" : "#6b6b9a",
+          fontSize:10, padding: active ? "3px 8px" : 0, letterSpacing:"0.12em",
+          textTransform:"uppercase", fontFamily:"inherit", fontWeight: active ? 700 : 500,
+          display:"inline-flex", alignItems:"center", gap:4,
+          boxShadow: active ? "0 0 8px #7c3aed55" : "none",
+        }}
+      >
+        {label}
+        <span style={{fontSize:8, color: active ? "#c8b8ff" : "#4a4a7a"}}>▼</span>
+      </button>
+      {open && (
+        <select
+          autoFocus
+          size={Math.min(options.length, 8)}
+          style={{
+            position:"fixed", top:pos.top, left:pos.left, zIndex:9999,
+            background:"#13131f", border:"1px solid #3a3a5c",
+            color:"#e8e4ff", borderRadius:8, padding:"4px 0",
+            fontFamily:"inherit", fontSize:12, outline:"none",
+            minWidth:150, cursor:"pointer", maxHeight:260, overflowY:"auto",
+            boxShadow:"0 8px 32px #000a",
+          }}
+          value={value}
+          onChange={e => { onChange(e.target.value); setOpen(false); }}
+          onBlur={() => setOpen(false)}
+        >
+          {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      )}
+    </>
+  );
+}
+
 // ─── INLINE ASSIGNEE ──────────────────────────────────────────────────────────
 function InlineAssignee({ task, onUpdate, users }) {
   const userOptions = users.map(u => ({ value: u, label: u }));
@@ -315,7 +372,7 @@ export default function App() {
   const [formErrors, setFormErrors] = useState({});
   const users = [UNASSIGNED, ...usersData.map(u => u.name)];
 
-  const [viewMode, setViewMode]       = useState("today");
+  const [viewMode, setViewMode]       = useState("all");
   const [historyTab, setHistoryTab]   = useState("done");
   const [filterDate, setFilterDate]   = useState("");
   const [filterFrom, setFilterFrom]   = useState("");
@@ -323,6 +380,9 @@ export default function App() {
   const [filterType, setFilterType]   = useState("");
   const [filterUser, setFilterUser]   = useState("");
   const [searchName, setSearchName]   = useState("");
+  const [filterShift, setFilterShift]           = useState("");
+  const [filterRecurrence, setFilterRecurrence] = useState("");
+  const [filterStatus, setFilterStatus]         = useState("");
   const [history, setHistory]         = useState([]);
   const [expandedHistoryId, setExpandedHistoryId] = useState(null);
   const [deleteConfirmTask, setDeleteConfirmTask] = useState(null);
@@ -331,6 +391,8 @@ export default function App() {
 
   const fileRef    = useRef();
   const timeInputRef = useRef();
+  const tasksRef = useRef(tasks);
+  useEffect(() => { tasksRef.current = tasks; }, [tasks]);
 
   // ── Firestore: tasks ──
   useEffect(() => {
@@ -363,17 +425,29 @@ export default function App() {
       const now = new Date();
       const todayStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}-${String(now.getDate()).padStart(2,"0")}`;
       for (const task of tasks) {
-        if (!task.validated) continue;
         if (!task.recurringDaily && !task.recurringWeekly && !task.recurringAnnually) continue;
         if (task.recurringStart && todayStr < task.recurringStart) continue;
         if (task.recurringEnd   && todayStr > task.recurringEnd)   continue;
-        let shouldReset = false;
+        const patch = {};
         if (task.recurringDaily) {
           const midnight = new Date(now); midnight.setHours(0,0,0,0);
-          const va = task.validatedAt ? new Date(task.validatedAt) : null;
-          if (va && va < midnight) shouldReset = true;
+          if (task.validated) {
+            const va = task.validatedAt ? new Date(task.validatedAt) : null;
+            if (va && va < midnight) {
+              patch.validated = false;
+              patch.validatedAt = null;
+              patch.lastReset = now.toISOString();
+            }
+          }
+          if (task.deadline && toDateStr(task.deadline) < todayStr) {
+            const dl = new Date(task.deadline);
+            patch.deadline = new Date(
+              now.getFullYear(), now.getMonth(), now.getDate(),
+              dl.getHours(), dl.getMinutes(), 0
+            ).toISOString();
+          }
         }
-        if (task.recurringWeekly) {
+        if (task.recurringWeekly && task.validated) {
           const [h,m] = (task.weeklyTime||"09:00").split(":").map(Number);
           const targetDay = DAY_INDEX[task.weeklyDay]??1;
           const lo = new Date(now);
@@ -381,10 +455,14 @@ export default function App() {
           if (db2===0){ const tt=new Date(now); tt.setHours(h,m,0,0); if(now<tt) db2=7; }
           lo.setDate(lo.getDate()-db2); lo.setHours(h,m,0,0);
           const va = task.validatedAt ? new Date(task.validatedAt) : null;
-          if (va && va < lo) shouldReset = true;
+          if (va && va < lo) {
+            patch.validated = false;
+            patch.validatedAt = null;
+            patch.lastReset = now.toISOString();
+          }
         }
-        if (shouldReset) {
-          await updateDoc(doc(db,"tasks",task.id),{ validated:false, validatedAt:null, lastReset:now.toISOString() });
+        if (Object.keys(patch).length > 0) {
+          await updateDoc(doc(db,"tasks",task.id), patch);
         }
       }
     }
@@ -395,25 +473,71 @@ export default function App() {
 
   // ── Daily archive at 23:59 ──
   useEffect(() => {
+    let running = false;
     async function checkDailyArchive() {
-      const now = new Date();
-      if (now.getHours() !== 23 || now.getMinutes() !== 59) return;
-      const todayStr = localToday();
-      for (const task of tasks) {
-        if (!task.validated) continue;
-        if (task.lastArchivedDate === todayStr) continue;
-        await addDoc(collection(db,"history"),{
-          action:"done", at:now.toISOString(),
-          name:task.name, assignee:task.assignee||"", type:task.type||"",
-          deadline:task.deadline||null, shift:task.shift||"", comment:task.comment||"",
+      if (running) return;
+      running = true;
+      try {
+        const now = new Date();
+        if (now.getHours() !== 23 || now.getMinutes() !== 59) return;
+        const todayStr = localToday();
+
+        // Tasks to archive (validated, non-recurring)
+        const toArchive = tasksRef.current.filter(t =>
+          t.validated && !t.recurringDaily && !t.recurringWeekly && !t.recurringAnnually
+        );
+
+        // Daily recurring tasks not done today → create a delayed copy for tomorrow
+        const toDelay = tasksRef.current.filter(t => {
+          if (!t.recurringDaily || t.validated) return false;
+          if (t.recurringStart && todayStr < t.recurringStart) return false;
+          if (t.recurringEnd   && todayStr > t.recurringEnd)   return false;
+          return true;
         });
-        await updateDoc(doc(db,"tasks",task.id),{ lastArchivedDate: todayStr });
+
+        if (toArchive.length === 0 && toDelay.length === 0) return;
+
+        const batch = writeBatch(db);
+
+        toArchive.forEach(task => {
+          const histRef = doc(collection(db,"history"));
+          batch.set(histRef, {
+            action:"done", at:now.toISOString(),
+            name:task.name||"", assignee:task.assignee||"", type:task.type||"",
+            deadline:task.deadline||null, shift:task.shift||"", comment:task.comment||"",
+          });
+          batch.delete(doc(db,"tasks",task.id));
+        });
+
+        toDelay.forEach(task => {
+          const newRef = doc(collection(db,"tasks"));
+          batch.set(newRef, {
+            name: `${task.name||""} (Delayed)`,
+            assignee: task.assignee || UNASSIGNED,
+            deadline: (() => { const d = new Date(now); d.setDate(d.getDate()+1); d.setHours(5,0,0,0); return d.toISOString(); })(),
+            type: task.type||"", comment: task.comment||"", shift: task.shift||"",
+            fileName: task.fileName||null, fileData: task.fileData||null,
+            recurringDaily: false, recurringWeekly: false, recurringAnnually: false,
+            weeklyDay: null, weeklyTime: null, recurringStart: null, recurringEnd: null,
+            validated: false, validatedAt: null,
+            createdAt: now.toISOString(), lastReset: null,
+          });
+        });
+
+        const archiveIds = new Set(toArchive.map(t => t.id));
+        setTasks(prev => prev.filter(t => !archiveIds.has(t.id)));
+        try {
+          await batch.commit();
+        } catch(e) {
+          console.error("Batch archive/delay failed", e);
+        }
+      } finally {
+        running = false;
       }
     }
-    if (tasks.length>0) checkDailyArchive();
     const t = setInterval(checkDailyArchive, 60000);
     return () => clearInterval(t);
-  }, [tasks]);
+  }, []);
 
   // ── User management ──
   async function addUser() {
@@ -439,6 +563,12 @@ export default function App() {
     if (searchName && !task.name.toLowerCase().includes(searchName.toLowerCase())) return false;
     if (filterType && task.type !== filterType) return false;
     if (filterUser && task.assignee !== filterUser) return false;
+    if (filterShift && task.shift !== filterShift) return false;
+    if (filterRecurrence === "daily"   && !task.recurringDaily)    return false;
+    if (filterRecurrence === "weekly"  && !task.recurringWeekly)   return false;
+    if (filterRecurrence === "annual"  && !task.recurringAnnually) return false;
+    if (filterStatus === "done"    && !task.validated)  return false;
+    if (filterStatus === "pending" &&  task.validated)  return false;
     const isRecurring = task.recurringDaily || task.recurringWeekly || task.recurringAnnually;
     if (viewMode==="today") return isToday(task.deadline) || (isRecurring && recurringOccursOn(task, toDateStr(new Date().toISOString())));
     if (viewMode==="date" && filterDate) return toDateStr(task.deadline)===filterDate || (isRecurring && recurringOccursOn(task, filterDate));
@@ -476,6 +606,12 @@ export default function App() {
     if (searchName && !t.name.toLowerCase().includes(searchName.toLowerCase())) return false;
     if (filterType && t.type !== filterType) return false;
     if (filterUser && t.assignee !== filterUser) return false;
+    if (filterShift && t.shift !== filterShift) return false;
+    if (filterRecurrence === "daily"   && !t.recurringDaily)    return false;
+    if (filterRecurrence === "weekly"  && !t.recurringWeekly)   return false;
+    if (filterRecurrence === "annual"  && !t.recurringAnnually) return false;
+    if (filterStatus === "done"    && !t.validated)  return false;
+    if (filterStatus === "pending" &&  t.validated)  return false;
     return true;
   };
 
@@ -627,7 +763,6 @@ export default function App() {
           <td style={S.td}>
             <div style={S.actions}>
               <button style={S.iconBtn} title="Edit" onClick={()=>openEdit(task)}>✎</button>
-              <button style={{...S.iconBtn,...S.iconBtnCopy}} title="Move to next day" onClick={()=>setMoveNextDayTask(task)}>→</button>
               <button style={{...S.iconBtn,...S.iconBtnRed}} title="Delete" onClick={()=>setDeleteConfirmTask(task)}>✕</button>
             </div>
           </td>
@@ -652,18 +787,30 @@ export default function App() {
     </colgroup>
   );
 
+  const colFilters = {
+    "Assigned to": { value: filterUser,       onChange: setFilterUser,       options: [{value:"",label:"All users"}, ...usersData.map(u=>({value:u.name,label:u.name}))] },
+    "Type":        { value: filterType,       onChange: setFilterType,       options: [{value:"",label:"All types"}, ...TASK_TYPES.map(t=>({value:t,label:t}))] },
+    "Shift":       { value: filterShift,      onChange: setFilterShift,      options: [{value:"",label:"All shifts"}, ...SHIFT_OPTIONS.filter(s=>s.value).map(s=>({value:s.value,label:s.label}))] },
+    "Recurrence":  { value: filterRecurrence, onChange: setFilterRecurrence, options: [{value:"",label:"All"},{value:"daily",label:"Daily"},{value:"weekly",label:"Weekly"},{value:"annual",label:"Annual"}] },
+    "Status":      { value: filterStatus,     onChange: setFilterStatus,     options: [{value:"",label:"All"},{value:"pending",label:"Pending"},{value:"done",label:"Done"}] },
+  };
   const tableHead = (
     <thead>
       <tr>
-        {[["#","center"],["Task","left"],["Assigned to","center"],["Type","center"],["Deadline","center"],["Shift","center"],["Comment","left"],["Recurrence","center"],["Document","center"],["Status","center"],["Actions","center"]].map(([h,align])=>(
-          <th key={h} style={{...S.th,textAlign:align}}>{h}</th>
-        ))}
+        {[["#","center"],["Task","left"],["Assigned to","center"],["Type","center"],["Deadline","center"],["Shift","center"],["Comment","left"],["Recurrence","center"],["Document","center"],["Status","center"],["Actions","center"]].map(([h,align])=>{
+          const cf = colFilters[h];
+          return (
+            <th key={h} style={{...S.th,textAlign:align}}>
+              {cf ? <ColFilterBtn label={h} value={cf.value} options={cf.options} onChange={cf.onChange}/> : h}
+            </th>
+          );
+        })}
       </tr>
     </thead>
   );
 
   if (!isLoggedIn) return (
-    <Login onLogin={() => { sessionStorage.setItem("tf_auth", "1"); setIsLoggedIn(true); }} />
+    <Login onLogin={() => { sessionStorage.setItem("tf_auth", "1"); setViewMode("all"); setIsLoggedIn(true); }} />
   );
 
   return (
@@ -676,14 +823,14 @@ export default function App() {
           </div>
         </div>
         <div style={S.stats}>
-          <Stat label="Total"      value={filteredTasks.length} color="#c8b8ff"/>
-          <Stat label="Done"       value={doneCount}            color="#6ee7b7"/>
+          <Stat label="Critical"   value={criticalCount}        color="#f97316"/>
           <Stat label="Overdue"    value={overdueCount}         color="#fca5a5"/>
           <Stat label="Unassigned" value={unassignedCount}      color="#74b0ff"/>
-          <Stat label="Critical"   value={criticalCount}        color="#f97316"/>
+          <Stat label="Done"       value={doneCount}            color="#6ee7b7"/>
+          <Stat label="Total"      value={filteredTasks.length} color="#c8b8ff"/>
         </div>
-        <button style={S.logoutBtn} onClick={() => { sessionStorage.removeItem("tf_auth"); setIsLoggedIn(false); }} title="Se déconnecter">
-          ⎋ Se déconnecter
+        <button style={S.logoutBtn} onClick={() => { sessionStorage.removeItem("tf_auth"); setIsLoggedIn(false); }} title="Sign out">
+          ⎋ Sign out
         </button>
       </header>
 
@@ -702,15 +849,7 @@ export default function App() {
               <DatePickerInput compact value={filterTo} onChange={setFilterTo}/>
             </div>
           )}
-          <input style={{...S.filterInput,minWidth:180}} placeholder="🔍 Search by name..." value={searchName} onChange={e=>setSearchName(e.target.value)}/>
-          <select className="filter-select" style={{...S.filterSelect,minWidth:140}} value={filterType} onChange={e=>setFilterType(e.target.value)}>
-            <option value="">🏷 All types</option>
-            {TASK_TYPES.map(t=><option key={t}>{t}</option>)}
-          </select>
-          <select className="filter-select" style={{...S.filterSelect,minWidth:155}} value={filterUser} onChange={e=>setFilterUser(e.target.value)}>
-            <option value="">👤 All users</option>
-            {usersData.map(u=><option key={u.id} value={u.name}>{u.name}</option>)}
-          </select>
+          <input style={{...S.filterInput,minWidth:180}} placeholder="🔍 Search task..." value={searchName} onChange={e=>setSearchName(e.target.value)}/>
           <button style={S.usersBtn} onClick={()=>setModal({mode:"manageUsers"})}>
             👥 Users ({usersData.length})
           </button>
@@ -1098,7 +1237,7 @@ const S = {
   logoMark:{ fontSize:32, color:"#c8b8ff", lineHeight:1, textShadow:"0 0 20px #c8b8ff88" },
   title:{ fontFamily:"'Syne',sans-serif", fontSize:26, fontWeight:800, color:"#fff", letterSpacing:"-0.5px" },
   subtitle:{ fontSize:11, color:"#6b6b9a", letterSpacing:"0.08em", marginTop:2 },
-  stats:{ display:"flex", gap:24 },
+  stats:{ display:"flex", gap:40, flex:1, justifyContent:"center" },
   main:{ padding:"28px 40px 60px" },
   filterBar:{ display:"flex", alignItems:"center", gap:10, marginBottom:20, flexWrap:"wrap" },
   filterTabs:{ display:"flex", gap:4 },
@@ -1106,9 +1245,9 @@ const S = {
   filterTabActive:{ background:"#2a2a4a", border:"1px solid #7c3aed66", color:"#c8b8ff" },
   filterInput:{ background:"#0d0d14", border:"1px solid #2a2a42", borderRadius:8, padding:"7px 12px", color:"#e8e4ff", fontSize:12, fontFamily:"inherit", outline:"none", colorScheme:"dark" },
   filterSelect:{ backgroundColor:"#1e1e35", border:"1px solid #4a3a7c", borderRadius:8, padding:"7px 12px", color:"#c8b8ff", fontSize:12, fontFamily:"inherit", outline:"none", colorScheme:"dark", cursor:"pointer", fontWeight:500, backgroundImage:"url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23c8b8ff' d='M6 9L1 3h10z'/%3E%3C/svg%3E\")", backgroundRepeat:"no-repeat", backgroundPosition:"right 10px center" },
-  usersBtn:{ background:"#1e1e35", border:"1px solid #c8b8ff44", color:"#c8b8ff", borderRadius:6, padding:"7px 14px", fontSize:11, cursor:"pointer", fontFamily:"inherit", letterSpacing:"0.04em" },
-  exportBtn:{ marginLeft:"auto", background:"#1e1e35", border:"1px solid #3a3a5c", color:"#6ee7b7", borderRadius:6, padding:"7px 16px", fontSize:11, cursor:"pointer", fontFamily:"inherit" },
-  logoutBtn:{ background:"none", border:"1px solid #2a2a42", color:"#6b6b9a", borderRadius:6, padding:"6px 14px", fontSize:11, cursor:"pointer", fontFamily:"inherit", letterSpacing:"0.04em", whiteSpace:"nowrap" },
+  usersBtn:{ marginLeft:"auto", background:"#1e1e35", border:"1px solid #c8b8ff44", color:"#c8b8ff", borderRadius:6, padding:"7px 14px", fontSize:11, cursor:"pointer", fontFamily:"inherit", letterSpacing:"0.04em" },
+  exportBtn:{ background:"#1e1e35", border:"1px solid #3a3a5c", color:"#6ee7b7", borderRadius:6, padding:"7px 16px", fontSize:11, cursor:"pointer", fontFamily:"inherit" },
+  logoutBtn:{ background:"none", border:"1px solid #e8e4ff55", color:"#e8e4ff", borderRadius:6, padding:"6px 14px", fontSize:11, cursor:"pointer", fontFamily:"inherit", letterSpacing:"0.04em", whiteSpace:"nowrap" },
   tableWrap:{ overflowX:"auto", borderRadius:12, border:"1px solid #2a2a42" },
   table:{ width:"100%", borderCollapse:"collapse", minWidth:1269, tableLayout:"fixed" },
   th:{ padding:"14px 16px", textAlign:"left", fontSize:10, letterSpacing:"0.12em", color:"#6b6b9a", background:"#13131f", borderBottom:"1px solid #2a2a42", fontWeight:500, textTransform:"uppercase", whiteSpace:"nowrap" },
@@ -1128,7 +1267,7 @@ const S = {
   fileBtn:{ background:"none", border:"1px solid #3a3a5c", color:"#c8b8ff", borderRadius:6, padding:"4px 10px", fontSize:11, cursor:"pointer", fontFamily:"inherit" },
   validateBtn:{ background:"linear-gradient(135deg,#4f46e5,#7c3aed)", border:"none", color:"#fff", borderRadius:6, padding:"6px 16px", fontSize:12, cursor:"pointer", fontFamily:"inherit", transition:"all 0.2s", fontWeight:600 },
   validateBtnDone:{ background:"#1a3d2e", border:"2px solid #6ee7b7bb", color:"#6ee7b7", fontWeight:700, boxShadow:"0 0 10px #6ee7b722" },
-  actions:{ display:"flex", gap:6 },
+  actions:{ display:"flex", gap:6, justifyContent:"center" },
   iconBtn:{ background:"#1e1e35", border:"1px solid #3a3a5c", color:"#c8b8ff", borderRadius:6, width:30, height:30, cursor:"pointer", fontSize:14, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:"inherit" },
   iconBtnRed:{ color:"#fca5a5", borderColor:"#ef444444" },
   iconBtnCopy:{ color:"#6ee7b7", borderColor:"#6ee7b744" },

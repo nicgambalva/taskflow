@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+ import { useState, useEffect, useRef } from "react";
 import { db } from "./firebase";
 import {
   collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, query, orderBy, runTransaction
@@ -589,7 +589,10 @@ export default function App() {
     if (filterStatus === "done"    && !task.validated)  return false;
     if (filterStatus === "pending" &&  task.validated)  return false;
     const isRecurring = task.recurringDaily || task.recurringWeekly || task.recurringAnnually;
-    if (viewMode==="today") return isToday(task.deadline) || (isRecurring && recurringOccursOn(task, toDateStr(new Date().toISOString())));
+    // validatedToday : garde visibles dans "Today" les tâches marquées done aujourd'hui (anti-missclick),
+    // même si leur deadline était dans le passé (overdue done)
+    const validatedToday = task.validated && task.validatedAt && isToday(task.validatedAt);
+    if (viewMode==="today") return isToday(task.deadline) || (isRecurring && recurringOccursOn(task, toDateStr(new Date().toISOString()))) || validatedToday;
     if (viewMode==="date" && filterDate) return toDateStr(task.deadline)===filterDate || (isRecurring && recurringOccursOn(task, filterDate));
     if (viewMode==="range") {
       if (isRecurring) return true;
@@ -634,17 +637,20 @@ export default function App() {
     return true;
   };
 
-  const sortedAllToday = sortTasks(tasks.filter(t => {
-    if (!baseFilter(t)) return false;
+  // Une tâche apparaît dans "Today" si : deadline aujourd'hui, OU occurrence récurrente aujourd'hui,
+  // OU overdue non-validée, OU validée aujourd'hui (anti-missclick : reste visible pour pouvoir undo)
+  const appearsInToday = t => {
     const rec = t.recurringDaily || t.recurringWeekly || t.recurringAnnually;
-    return isToday(t.deadline) || (rec && recurringOccursOn(t, todayStr)) || isOverdue(t.deadline, t.validated);
-  }));
+    const validatedToday = t.validated && t.validatedAt && isToday(t.validatedAt);
+    return isToday(t.deadline) || (rec && recurringOccursOn(t, todayStr)) || isOverdue(t.deadline, t.validated) || validatedToday;
+  };
+
+  const sortedAllToday = sortTasks(tasks.filter(t => baseFilter(t) && appearsInToday(t)));
 
   const sortedAllUpcoming = sortTasks(tasks.filter(t => {
     if (!baseFilter(t)) return false;
+    if (appearsInToday(t)) return false;
     const rec = t.recurringDaily || t.recurringWeekly || t.recurringAnnually;
-    const appearsToday = isToday(t.deadline) || (rec && recurringOccursOn(t, todayStr)) || isOverdue(t.deadline, t.validated);
-    if (appearsToday) return false;
     if (rec) return true;
     if (!t.deadline) return false;
     return new Date(t.deadline) > new Date();

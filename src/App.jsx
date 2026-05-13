@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef } from "react";
+ import { useState, useEffect, useRef } from "react";
 import { db } from "./firebase";
 import {
-  collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, query, orderBy, writeBatch
+  collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, query, orderBy, runTransaction
 } from "firebase/firestore";
 import Login from "./Login";
 
@@ -20,7 +20,17 @@ const DAYS  = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Su
 const DAY_INDEX = { Monday:1,Tuesday:2,Wednesday:3,Thursday:4,Friday:5,Saturday:6,Sunday:0 };
 const UNASSIGNED = "— Unassigned —";
 
+// Heure de l'archivage daily (format "HH:MM", 24h). Modifier pour tester à un autre horaire.
+// En prod : "23:59". L'archive se déclenche dès qu'on est passé cette heure ET qu'elle n'a pas
+// déjà tourné aujourd'hui (guard localStorage), donc tolérant aux minutes ratées.
+const DAILY_ARCHIVE_HH_MM = "23:59";
+
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
+function isWeekend(date) {
+  const d = (date instanceof Date) ? date : new Date(date);
+  const day = d.getDay();
+  return day === 0 || day === 6; // 0 = dimanche, 6 = samedi
+}
 function isOverdue(deadline, validated) {
   if (validated || !deadline) return false;
   return new Date() > new Date(deadline);
@@ -46,7 +56,7 @@ function recurringOccursOn(task, dateStr) {
   if (task.recurringStart && dateStr < task.recurringStart) return false;
   if (task.recurringEnd   && dateStr > task.recurringEnd)   return false;
   const d = new Date(dateStr + "T12:00:00");
-  if (task.recurringDaily) return true;
+  if (task.recurringDaily) return !isWeekend(d); // les daily ne s'affichent pas Sam/Dim
   if (task.recurringWeekly) return d.getDay() === (DAY_INDEX[task.weeklyDay] ?? 1);
   if (task.recurringAnnually && task.deadline) {
     const dl = new Date(task.deadline);
@@ -58,6 +68,7 @@ function getNextReset(task) {
   const now = new Date();
   if (task.recurringDaily) {
     const next = new Date(now); next.setDate(next.getDate()+1); next.setHours(0,0,0,0);
+    while (isWeekend(next)) next.setDate(next.getDate() + 1); // saute Sam/Dim
     return next.toISOString();
   }
   if (task.recurringWeekly) {
@@ -377,6 +388,7 @@ export default function App() {
   useEffect(() => {
     async function checkResets() {
       const now = new Date();
+      if (isWeekend(now)) return; // pas de reset/roll forward sur Sam/Dim
       const todayStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}-${String(now.getDate()).padStart(2,"0")}`;
       for (const task of tasks) {
         if (!task.recurringDaily && !task.recurringWeekly && !task.recurringAnnually) continue;
@@ -415,6 +427,17 @@ export default function App() {
             patch.lastReset = now.toISOString();
           }
         }
+        // Advance deadline to next occurrence for missed weekly tasks
+        if (task.recurringWeekly && !task.validated && task.deadline && toDateStr(task.deadline) < todayStr) {
+          const [h,m] = (task.weeklyTime||"09:00").split(":").map(Number);
+          const targetDay = DAY_INDEX[task.weeklyDay]??1;
+          const next = new Date(now);
+          let daysAhead = (targetDay - now.getDay() + 7) % 7;
+          if (daysAhead === 0) daysAhead = 7;
+          next.setDate(next.getDate() + daysAhead);
+          next.setHours(h, m, 0, 0);
+          patch.deadline = next.toISOString();
+        }
         if (Object.keys(patch).length > 0) {
           await updateDoc(doc(db,"tasks",task.id), patch);
         }
@@ -425,7 +448,11 @@ export default function App() {
     return () => clearInterval(t);
   }, [tasks]);
 
-  // ── Daily archive at 23:59 ──
+  // ── Daily archive (heure configurable via DAILY_ARCHIVE_HH_MM) ──
+  // Guard à 2 niveaux :
+  //   1. localStorage : cache rapide, empêche le re-check à chaque tick dans le même navigateur
+  //   2. Firestore transaction sur metadata/lastArchive : guard cross-user/cross-device.
+  //      Si un autre user a déjà archivé aujourd'hui, la transaction est annulée → aucun doublon.
   useEffect(() => {
     let running = false;
     async function checkDailyArchive() {
@@ -433,15 +460,30 @@ export default function App() {
       running = true;
       try {
         const now = new Date();
-        if (now.getHours() !== 23 || now.getMinutes() !== 59) return;
+        if (isWeekend(now)) return; // pas d'archive le Sam/Dim
         const todayStr = localToday();
+        const [aH, aM] = DAILY_ARCHIVE_HH_MM.split(":").map(Number);
+        const archiveTime = new Date(now);
+        archiveTime.setHours(aH, aM, 0, 0);
+        if (now < archiveTime) return;
 
-        // Tasks to archive (validated, non-recurring)
+        const archiveKey = `tf_archived_${todayStr}`;
+        if (localStorage.getItem(archiveKey)) return;
+
+        // Tâches ponctuelles validated → archive + delete
         const toArchive = tasksRef.current.filter(t =>
           t.validated && !t.recurringDaily && !t.recurringWeekly && !t.recurringAnnually
         );
-
-        // Daily recurring tasks not done today → create a delayed copy for tomorrow
+        // Tâches daily récurrentes validated → archive seulement (la tâche reste, le reset à minuit
+        // remet validated=false et la récurrence continue)
+        const recurringDone = tasksRef.current.filter(t => {
+          if (!t.recurringDaily || !t.validated) return false;
+          if (t.recurringStart && todayStr < t.recurringStart) return false;
+          if (t.recurringEnd   && todayStr > t.recurringEnd)   return false;
+          return true;
+        });
+        // Tâches daily récurrentes NON validated → créer copie ponctuelle "(Delayed)" avec
+        // la deadline d'origine (typiquement J HH:MM, donc overdue dès le lendemain)
         const toDelay = tasksRef.current.filter(t => {
           if (!t.recurringDaily || t.validated) return false;
           if (t.recurringStart && todayStr < t.recurringStart) return false;
@@ -449,46 +491,69 @@ export default function App() {
           return true;
         });
 
-        if (toArchive.length === 0 && toDelay.length === 0) return;
+        const metaRef = doc(db, "metadata", "lastArchive");
 
-        const batch = writeBatch(db);
-
-        toArchive.forEach(task => {
-          const histRef = doc(collection(db,"history"));
-          batch.set(histRef, {
-            action:"done", at:now.toISOString(),
-            name:task.name||"", assignee:task.assignee||"", type:task.type||"",
-            deadline:task.deadline||null, shift:task.shift||"", comment:task.comment||"",
-          });
-          batch.delete(doc(db,"tasks",task.id));
-        });
-
-        toDelay.forEach(task => {
-          const newRef = doc(collection(db,"tasks"));
-          batch.set(newRef, {
-            name: `${task.name||""} (Delayed)`,
-            assignee: task.assignee || UNASSIGNED,
-            deadline: (() => { const d = new Date(now); d.setDate(d.getDate()+1); d.setHours(5,0,0,0); return d.toISOString(); })(),
-            type: task.type||"", comment: task.comment||"", shift: task.shift||"",
-            fileName: task.fileName||null, fileData: task.fileData||null,
-            recurringDaily: false, recurringWeekly: false, recurringAnnually: false,
-            weeklyDay: null, weeklyTime: null, recurringStart: null, recurringEnd: null,
-            validated: false, validatedAt: null,
-            createdAt: now.toISOString(), lastReset: null,
-          });
-        });
-
-        const archiveIds = new Set(toArchive.map(t => t.id));
-        setTasks(prev => prev.filter(t => !archiveIds.has(t.id)));
         try {
-          await batch.commit();
+          await runTransaction(db, async (tx) => {
+            const metaSnap = await tx.get(metaRef);
+            if (metaSnap.exists() && metaSnap.data().date === todayStr) {
+              throw new Error("ALREADY_ARCHIVED");
+            }
+            tx.set(metaRef, { date: todayStr, at: now.toISOString() });
+
+            toArchive.forEach(task => {
+              const histRef = doc(collection(db,"history"));
+              tx.set(histRef, {
+                action:"done", at:now.toISOString(),
+                name:task.name||"", assignee:task.assignee||"", type:task.type||"",
+                deadline:task.deadline||null, shift:task.shift||"", comment:task.comment||"",
+              });
+              tx.delete(doc(db,"tasks",task.id));
+            });
+
+            recurringDone.forEach(task => {
+              const histRef = doc(collection(db,"history"));
+              tx.set(histRef, {
+                action:"done", at:now.toISOString(),
+                name:task.name||"", assignee:task.assignee||"", type:task.type||"",
+                deadline:task.deadline||null, shift:task.shift||"", comment:task.comment||"",
+              });
+            });
+
+            toDelay.forEach(task => {
+              const newRef = doc(collection(db,"tasks"));
+              tx.set(newRef, {
+                name: `${task.name||""} (Delayed)`,
+                assignee: task.assignee || UNASSIGNED,
+                deadline: task.deadline || now.toISOString(),
+                type: task.type||"", comment: task.comment||"", shift: task.shift||"",
+                fileName: task.fileName||null, fileData: task.fileData||null,
+                recurringDaily: false, recurringWeekly: false, recurringAnnually: false,
+                weeklyDay: null, weeklyTime: null, recurringStart: null, recurringEnd: null,
+                validated: false, validatedAt: null,
+                createdAt: now.toISOString(), lastReset: null,
+              });
+            });
+          });
+
+          // Transaction OK : on cache localement + optimistic UI
+          localStorage.setItem(archiveKey, "1");
+          const archiveIds = new Set(toArchive.map(t => t.id));
+          if (archiveIds.size > 0) setTasks(prev => prev.filter(t => !archiveIds.has(t.id)));
+
         } catch(e) {
-          console.error("Batch archive/delay failed", e);
+          if (e.message === "ALREADY_ARCHIVED") {
+            // Un autre user a archivé en premier : on cache localement et on sort
+            localStorage.setItem(archiveKey, "1");
+          } else {
+            console.error("Archive transaction failed:", e);
+          }
         }
       } finally {
         running = false;
       }
     }
+    checkDailyArchive();
     const t = setInterval(checkDailyArchive, 60000);
     return () => clearInterval(t);
   }, []);
@@ -572,13 +637,13 @@ export default function App() {
   const sortedAllToday = sortTasks(tasks.filter(t => {
     if (!baseFilter(t)) return false;
     const rec = t.recurringDaily || t.recurringWeekly || t.recurringAnnually;
-    return isToday(t.deadline) || (rec && recurringOccursOn(t, todayStr));
+    return isToday(t.deadline) || (rec && recurringOccursOn(t, todayStr)) || isOverdue(t.deadline, t.validated);
   }));
 
   const sortedAllUpcoming = sortTasks(tasks.filter(t => {
     if (!baseFilter(t)) return false;
     const rec = t.recurringDaily || t.recurringWeekly || t.recurringAnnually;
-    const appearsToday = isToday(t.deadline) || (rec && recurringOccursOn(t, todayStr));
+    const appearsToday = isToday(t.deadline) || (rec && recurringOccursOn(t, todayStr)) || isOverdue(t.deadline, t.validated);
     if (appearsToday) return false;
     if (rec) return true;
     if (!t.deadline) return false;

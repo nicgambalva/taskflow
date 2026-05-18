@@ -12,7 +12,7 @@ export default function Login({ onLogin }) {
     if (password === APP_PASSWORD) {
       onLogin();
     } else {
-      setError("Mot de passe incorrect.");
+      setError("Incorrect password.");
       setPassword("");
     }
   }
@@ -22,11 +22,11 @@ export default function Login({ onLogin }) {
       <div style={S.card}>
         <div style={S.logo}>✦</div>
         <div style={S.title}>TaskFlow</div>
-        <div style={S.subtitle}>Entrez le mot de passe pour accéder à l'application</div>
+        <div style={S.subtitle}>Enter the password to access the application</div>
 
         <form onSubmit={handleSubmit} style={S.form}>
           <div style={S.field}>
-            <label style={S.label}>Mot de passe</label>
+            <label style={S.label}>Password</label>
             <input
               type="password"
               autoComplete="current-password"
@@ -45,7 +45,7 @@ export default function Login({ onLogin }) {
             disabled={!password}
             style={{...S.btn, ...(!password ? S.btnDisabled : {})}}
           >
-            Se connecter
+            Sign in
           </button>
         </form>
       </div>
